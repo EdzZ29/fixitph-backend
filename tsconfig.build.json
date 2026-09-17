@@ -1,4 +1,16 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
+  "compilerOptions": {
+    // rootDir pins the output layout. Without it, adding prisma/seed.ts to the
+    // program widens the common root and everything lands in dist/src, which
+    // silently breaks `node dist/main`.
+    "rootDir": "./src",
+    // The incremental cache has to live inside outDir. nest-cli's
+    // deleteOutDir wipes dist on every start, and a cache file outside it
+    // survives, so tsc decides everything is already emitted and writes
+    // nothing: "Found 0 errors" followed by "Cannot find module dist/main".
+    "tsBuildInfoFile": "./dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "test", "dist", "prisma", "scripts", "**/*spec.ts"]
 }

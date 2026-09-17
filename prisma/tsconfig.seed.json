@@ -1,0 +1,15 @@
+{
+  // ts-node needs CommonJS to run the seed directly, but the app builds with
+  // "nodenext". Passing --compiler-options inline breaks on Windows, where the
+  // shell strips the quotes out of the JSON before ts-node sees it, so the
+  // override lives in a file instead.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "noEmit": true,
+    "incremental": false,
+    "isolatedModules": false
+  },
+  "include": ["seed.ts"]
+}

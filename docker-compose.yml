@@ -1,0 +1,111 @@
+# Local development dependencies for the FixItPH API.
+#
+#   docker compose up -d
+#
+# Postgres listens on 5432 and Redis on 6379. The API itself is not in here on
+# purpose: it runs with `npm run start:dev` so hot reload works against these.
+#
+# MinIO gives you an S3-compatible bucket for the private uploads without
+# needing an AWS account.
+#
+# NOTE for this machine: PostgreSQL 17 is installed locally and listening on
+# port 3000, and the project is configured to use it (see
+# scripts/setup-local-postgres.sql). Do not start the postgres service here as
+# well, or you will have two databases and a port fight. Start only what you
+# actually need:
+#
+#   docker compose up -d redis
+#   docker compose up -d minio minio-init   # only when working on uploads
+
+name: fixitph
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: fixitph-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fixitph}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fixitph_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-fixitph}
+      # Used by the init script below to create the least-privilege runtime role.
+      APP_DB_USER: ${APP_DB_USER:-fixitph_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-fixitph_app_dev_password}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    ports:
+      # Right-hand side is the port inside the container, which is always 5432
+      # for the official image. Change only the left-hand side, and only via
+      # POSTGRES_PORT.
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Runs once, on an empty data directory. Creates the runtime role with a
+      # password so no secret has to live in a migration file.
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-fixitph} -d ${POSTGRES_DB:-fixitph}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: fixitph-redis
+    restart: unless-stopped
+    # Persistence on, because the cache holding a version counter across a
+    # restart is cheaper than a cold stampede.
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # S3-compatible private bucket for provider documents and service images.
+  minio:
+    image: minio/minio:latest
+    container_name: fixitph-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-fixitph_minio}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-fixitph_minio_dev_password}
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Creates the bucket once MinIO is up, then exits.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY_ID:-fixitph_minio} ${S3_SECRET_ACCESS_KEY:-fixitph_minio_dev_password} &&
+      mc mb --ignore-existing local/${S3_BUCKET:-fixitph-private} &&
+      mc anonymous set none local/${S3_BUCKET:-fixitph-private} &&
+      echo 'bucket ready, private'
+      "
+    restart: 'no'
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
