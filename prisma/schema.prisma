@@ -262,6 +262,16 @@ enum DisputeStatus {
   @@map("dispute_status")
 }
 
+/// How a platform setting's value is to be read out of its JSON column.
+enum SettingValueType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+
+  @@map("setting_value_type")
+}
+
 enum AdminActionType {
   PROVIDER_VERIFICATION_APPROVE
   PROVIDER_VERIFICATION_REJECT
@@ -275,6 +285,7 @@ enum AdminActionType {
   DISPUTE_RESOLVE
   REPORT_RESOLVE
   CATEGORY_MUTATE
+  SETTING_UPDATE
 
   @@map("admin_action_type")
 }
@@ -289,6 +300,7 @@ enum AdminActionTargetType {
   REPORT
   DISPUTE
   CATEGORY
+  SETTING
 
   @@map("admin_action_target_type")
 }
@@ -318,25 +330,26 @@ model User {
   updatedAt         DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt         DateTime?  @map("deleted_at") @db.Timestamptz(6)
 
-  profile              Profile?
-  provider             Provider?
-  refreshTokens        RefreshToken[]
-  passwordResetTokens  PasswordResetToken[]
-  serviceRequests      ServiceRequest[]      @relation("CustomerServiceRequests")
-  bookings             Booking[]             @relation("CustomerBookings")
-  bookingsCancelled    Booking[]             @relation("BookingCancelledBy")
-  statusChanges        BookingStatusHistory[]
-  reviewsAuthored      Review[]              @relation("ReviewAuthor")
-  messagesSent         Message[]             @relation("MessageSender")
-  messagesReceived     Message[]             @relation("MessageRecipient")
-  favorites            Favorite[]
-  notifications        Notification[]
-  reportsFiled         Report[]              @relation("ReportReporter")
-  reportsResolved      Report[]              @relation("ReportResolver")
-  disputesRaised       Dispute[]             @relation("DisputeRaisedBy")
-  disputesResolved     Dispute[]             @relation("DisputeResolver")
-  documentsReviewed    ProviderDocument[]    @relation("DocumentReviewer")
-  adminActions         AdminAction[]
+  profile             Profile?
+  provider            Provider?
+  refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+  serviceRequests     ServiceRequest[]       @relation("CustomerServiceRequests")
+  bookings            Booking[]              @relation("CustomerBookings")
+  bookingsCancelled   Booking[]              @relation("BookingCancelledBy")
+  statusChanges       BookingStatusHistory[]
+  reviewsAuthored     Review[]               @relation("ReviewAuthor")
+  messagesSent        Message[]              @relation("MessageSender")
+  messagesReceived    Message[]              @relation("MessageRecipient")
+  favorites           Favorite[]
+  notifications       Notification[]
+  reportsFiled        Report[]               @relation("ReportReporter")
+  reportsResolved     Report[]               @relation("ReportResolver")
+  disputesRaised      Dispute[]              @relation("DisputeRaisedBy")
+  disputesResolved    Dispute[]              @relation("DisputeResolver")
+  documentsReviewed   ProviderDocument[]     @relation("DocumentReviewer")
+  adminActions        AdminAction[]
+  settingsUpdated     PlatformSetting[]
 
   @@index([role, status])
   @@index([deletedAt])
@@ -345,25 +358,25 @@ model User {
 
 /// One row per user. Holds the PII: legal name, exact address, coordinates.
 model Profile {
-  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId       String    @unique @map("user_id") @db.Uuid
-  firstName    String    @map("first_name") @db.VarChar(100)
-  lastName     String    @map("last_name") @db.VarChar(100)
-  displayName  String?   @map("display_name") @db.VarChar(120)
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String   @unique @map("user_id") @db.Uuid
+  firstName    String   @map("first_name") @db.VarChar(100)
+  lastName     String   @map("last_name") @db.VarChar(100)
+  displayName  String?  @map("display_name") @db.VarChar(120)
   /// Private object storage key. Never returned raw; exchanged for a signed URL.
-  avatarKey    String?   @map("avatar_key") @db.Text
-  bio          String?   @db.Text
-  addressLine1 String?   @map("address_line1") @db.VarChar(255)
-  addressLine2 String?   @map("address_line2") @db.VarChar(255)
-  barangay     String?   @db.VarChar(120)
-  city         String?   @db.VarChar(120)
-  province     String?   @db.VarChar(120)
-  postalCode   String?   @map("postal_code") @db.VarChar(16)
-  latitude     Decimal?  @db.Decimal(9, 6)
-  longitude    Decimal?  @db.Decimal(9, 6)
-  locale       String    @default("en-PH") @db.VarChar(10)
-  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  avatarKey    String?  @map("avatar_key") @db.Text
+  bio          String?  @db.Text
+  addressLine1 String?  @map("address_line1") @db.VarChar(255)
+  addressLine2 String?  @map("address_line2") @db.VarChar(255)
+  barangay     String?  @db.VarChar(120)
+  city         String?  @db.VarChar(120)
+  province     String?  @db.VarChar(120)
+  postalCode   String?  @map("postal_code") @db.VarChar(16)
+  latitude     Decimal? @db.Decimal(9, 6)
+  longitude    Decimal? @db.Decimal(9, 6)
+  locale       String   @default("en-PH") @db.VarChar(10)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -786,23 +799,23 @@ model BookingStatusHistory {
 /// One review per booking, enforced by the unique constraint on bookingId.
 /// Edits append to editHistory rather than overwriting the comment.
 model Review {
-  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  bookingId          String    @unique @map("booking_id") @db.Uuid
-  authorId           String    @map("author_id") @db.Uuid
-  providerId         String    @map("provider_id") @db.Uuid
-  rating             Int
-  punctualityRating  Int?      @map("punctuality_rating")
-  qualityRating      Int?      @map("quality_rating")
-  valueRating        Int?      @map("value_rating")
-  comment            String?   @db.Text
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId           String    @unique @map("booking_id") @db.Uuid
+  authorId            String    @map("author_id") @db.Uuid
+  providerId          String    @map("provider_id") @db.Uuid
+  rating              Int
+  punctualityRating   Int?      @map("punctuality_rating")
+  qualityRating       Int?      @map("quality_rating")
+  valueRating         Int?      @map("value_rating")
+  comment             String?   @db.Text
   /// Append-only array of { comment, rating, editedAt } snapshots.
-  editHistory        Json      @default("[]") @map("edit_history") @db.JsonB
-  providerResponse   String?   @map("provider_response") @db.Text
+  editHistory         Json      @default("[]") @map("edit_history") @db.JsonB
+  providerResponse    String?   @map("provider_response") @db.Text
   providerRespondedAt DateTime? @map("provider_responded_at") @db.Timestamptz(6)
-  isHidden           Boolean   @default(false) @map("is_hidden")
-  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  deletedAt          DateTime? @map("deleted_at") @db.Timestamptz(6)
+  isHidden            Boolean   @default(false) @map("is_hidden")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt           DateTime? @map("deleted_at") @db.Timestamptz(6)
 
   booking  Booking  @relation(fields: [bookingId], references: [id], onDelete: Restrict)
   author   User     @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Restrict)
@@ -936,6 +949,36 @@ model Dispute {
   @@index([bookingId])
   @@index([status, createdAt])
   @@map("disputes")
+}
+
+/// Operator-editable platform configuration. Key/value rather than a column
+/// per setting, so adding one is a seed row instead of a migration. Every
+/// write goes through the admin module and lands in admin_actions.
+///
+/// isPublic marks the rows the unauthenticated site may read (a maintenance
+/// notice has to be readable by someone who cannot log in). RLS enforces that
+/// split, so a mistake in the service layer cannot expose a private setting.
+model PlatformSetting {
+  key         String           @id @db.VarChar(80)
+  value       Json             @db.JsonB
+  valueType   SettingValueType @default(STRING) @map("value_type")
+  label       String           @db.VarChar(160)
+  description String?          @db.Text
+  group       String           @default("general") @db.VarChar(60)
+  position    Int              @default(0)
+  /// Readable without authentication. Keep false unless the public site needs it.
+  isPublic    Boolean          @default(false) @map("is_public")
+  /// Set by an operator rather than seeded. Editing is refused for false.
+  isEditable  Boolean          @default(true) @map("is_editable")
+  updatedById String?          @map("updated_by_id") @db.Uuid
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  updatedBy User? @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([group, position])
+  @@index([isPublic])
+  @@map("platform_settings")
 }
 
 /// Insert-only audit log. Written in the same transaction as the action it

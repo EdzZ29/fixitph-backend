@@ -56,7 +56,7 @@ export class ReportsService {
     user: AuthenticatedUser,
     dto: CreateReportDto,
   ): Promise<unknown> {
-    const exists = await this.targetExists(dto.targetType, dto.targetId);
+    const exists = await this.targetExists(user, dto.targetType, dto.targetId);
     if (!exists)
       throw ApiError.notFound(
         'TARGET_NOT_FOUND',
@@ -123,44 +123,55 @@ export class ReportsService {
     });
   }
 
+  /**
+   * Whether the thing being reported is real.
+   *
+   * Runs in the reporter's own context: reviews, messages and bookings are
+   * under RLS, and checking them with no context set meant every report
+   * against one came back "there is nothing to report there". A reporter can
+   * see what they are reporting — that is how they came to report it.
+   */
   private async targetExists(
+    user: AuthenticatedUser,
     type: ReportTargetType,
     id: string,
   ): Promise<boolean> {
-    switch (type) {
-      case ReportTargetType.USER:
-        return !!(await this.prisma.user.findFirst({
-          where: { id, deletedAt: null },
-          select: { id: true },
-        }));
-      case ReportTargetType.PROVIDER:
-        return !!(await this.prisma.provider.findFirst({
-          where: { id, deletedAt: null },
-          select: { id: true },
-        }));
-      case ReportTargetType.SERVICE:
-        return !!(await this.prisma.service.findFirst({
-          where: { id, deletedAt: null },
-          select: { id: true },
-        }));
-      case ReportTargetType.REVIEW:
-        return !!(await this.prisma.review.findFirst({
-          where: { id, deletedAt: null },
-          select: { id: true },
-        }));
-      case ReportTargetType.MESSAGE:
-        return !!(await this.prisma.message.findUnique({
-          where: { id },
-          select: { id: true },
-        }));
-      case ReportTargetType.BOOKING:
-        return !!(await this.prisma.booking.findFirst({
-          where: { id, deletedAt: null },
-          select: { id: true },
-        }));
-      default:
-        return false;
-    }
+    return this.prisma.withUser(toAuthContext(user), async (tx) => {
+      switch (type) {
+        case ReportTargetType.USER:
+          return !!(await tx.user.findFirst({
+            where: { id, deletedAt: null },
+            select: { id: true },
+          }));
+        case ReportTargetType.PROVIDER:
+          return !!(await tx.provider.findFirst({
+            where: { id, deletedAt: null },
+            select: { id: true },
+          }));
+        case ReportTargetType.SERVICE:
+          return !!(await tx.service.findFirst({
+            where: { id, deletedAt: null },
+            select: { id: true },
+          }));
+        case ReportTargetType.REVIEW:
+          return !!(await tx.review.findFirst({
+            where: { id, deletedAt: null },
+            select: { id: true },
+          }));
+        case ReportTargetType.MESSAGE:
+          return !!(await tx.message.findUnique({
+            where: { id },
+            select: { id: true },
+          }));
+        case ReportTargetType.BOOKING:
+          return !!(await tx.booking.findFirst({
+            where: { id, deletedAt: null },
+            select: { id: true },
+          }));
+        default:
+          return false;
+      }
+    });
   }
 }
 
@@ -169,7 +180,7 @@ export class ReportsController {
   constructor(private readonly reports: ReportsService) {}
 
   @Post()
-  @Throttle({ write: WRITE_THROTTLE.report })
+  @Throttle({ default: WRITE_THROTTLE.report })
   create(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreateReportDto) {
     return this.reports.create(user, dto);
   }

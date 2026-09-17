@@ -12,7 +12,7 @@ export class MessagesController {
 
   /** Rate limited: messaging is the other obvious spam surface. */
   @Post()
-  @Throttle({ messaging: MESSAGING_THROTTLE.send })
+  @Throttle({ default: MESSAGING_THROTTLE.send })
   send(@CurrentUser() user: AuthenticatedUser, @Body() dto: SendMessageDto) {
     return this.messages.send(user, dto);
   }

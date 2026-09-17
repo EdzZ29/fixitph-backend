@@ -33,7 +33,7 @@ export class RequestsController {
   @Post()
   @UseGuards(RolesGuard)
   @Roles(UserRole.CUSTOMER, UserRole.PROVIDER, UserRole.ADMIN)
-  @Throttle({ write: WRITE_THROTTLE.serviceRequest })
+  @Throttle({ default: WRITE_THROTTLE.serviceRequest })
   create(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateRequestDto,

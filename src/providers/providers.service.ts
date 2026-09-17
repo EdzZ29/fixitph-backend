@@ -4,10 +4,17 @@ import { ApiError } from '../common/errors';
 import { CacheService, TTL } from '../cache/cache.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { paginate, type Paginated } from '../common/dto/pagination.dto';
-import type { AuthenticatedUser } from '../common/types';
+import { toAuthContext, type AuthenticatedUser } from '../common/types';
 import type { CreateProviderDto } from './dto/create-provider.dto';
 import type { UpdateProviderDto } from './dto/update-provider.dto';
 import type { SearchProvidersDto } from './dto/search-providers.dto';
+
+/**
+ * Tells a uuid path parameter from a slug. Slugs are generated from the
+ * business name and lowercased, so they never take this shape.
+ */
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Fields safe to return on a public listing. No user id, no exact address. */
 const PUBLIC_PROVIDER_SELECT = {
@@ -133,12 +140,21 @@ export class ProvidersService {
     });
   }
 
-  async findOne(id: string): Promise<unknown> {
-    const key = this.cache.detailKey('providers', id);
+  /**
+   * Looked up by id or by slug. A public profile is linked by slug, because
+   * /providers/aircon-pro-butuan is a better thing to share than a uuid, and
+   * slug is unique. The two are told apart by shape rather than by trying one
+   * and falling back, so a miss is a single query.
+   */
+  async findOne(idOrSlug: string): Promise<unknown> {
+    const byId = UUID_PATTERN.test(idOrSlug);
+    const key = this.cache.detailKey('providers', idOrSlug);
 
     const provider = await this.cache.wrap(key, TTL.DETAIL, async () =>
       this.prisma.provider.findFirst({
-        where: { id, deletedAt: null },
+        where: byId
+          ? { id: idOrSlug, deletedAt: null }
+          : { slug: idOrSlug, deletedAt: null },
         select: {
           ...PUBLIC_PROVIDER_SELECT,
           services: {
@@ -297,21 +313,33 @@ export class ProvidersService {
     return provider;
   }
 
-  /** Soft delete. The row stays for the booking history that references it. */
-  async remove(id: string): Promise<{ id: string; deletedAt: Date }> {
+  /**
+   * Soft delete. The row stays for the booking history that references it.
+   *
+   * Takes the caller because the active-booking guard below has to actually
+   * see those bookings: `bookings` is under RLS, and counting with no session
+   * context returned zero every time — which let a provider close a profile
+   * with live jobs on it.
+   */
+  async remove(
+    user: AuthenticatedUser,
+    id: string,
+  ): Promise<{ id: string; deletedAt: Date }> {
     const provider = await this.prisma.provider.findFirst({
       where: { id, deletedAt: null },
       select: { id: true },
     });
     if (!provider) throw ApiError.notFound('PROVIDER_NOT_FOUND');
 
-    const active = await this.prisma.booking.count({
-      where: {
-        providerId: id,
-        deletedAt: null,
-        status: { in: ['PENDING_CONFIRMATION', 'CONFIRMED', 'IN_PROGRESS'] },
-      },
-    });
+    const active = await this.prisma.withUser(toAuthContext(user), (tx) =>
+      tx.booking.count({
+        where: {
+          providerId: id,
+          deletedAt: null,
+          status: { in: ['PENDING_CONFIRMATION', 'CONFIRMED', 'IN_PROGRESS'] },
+        },
+      }),
+    );
     if (active > 0) {
       throw ApiError.conflict(
         'PROVIDER_HAS_ACTIVE_BOOKINGS',

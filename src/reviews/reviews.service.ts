@@ -33,13 +33,19 @@ const PUBLIC_REVIEW_SELECT = {
   author: {
     select: { profile: { select: { displayName: true, firstName: true } } },
   },
-  booking: {
-    select: {
-      id: true,
-      completedAt: true,
-      service: { select: { title: true } },
-    },
-  },
+  /**
+   * No booking join, deliberately.
+   *
+   * Review.booking is a *required* relation, and `bookings` is under row
+   * level security with no public clause — so an anonymous reader got a
+   * review whose booking came back empty and Prisma refused the whole result
+   * with "Field booking is required to return data, got null instead". Every
+   * public provider profile 500'd as soon as the provider had a review.
+   *
+   * Widening the booking policy to fix a cosmetic detail would be the wrong
+   * trade: a public review does not need to reach into a private booking.
+   * `profiles` is not under RLS, which is why the author join is fine.
+   */
 } satisfies Prisma.ReviewSelect;
 
 @Injectable()

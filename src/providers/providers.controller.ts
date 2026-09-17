@@ -40,10 +40,11 @@ export class ProvidersController {
     return this.providers.search(dto);
   }
 
+  /** Accepts a uuid or a slug, so a public profile can be linked by name. */
   @Public()
-  @Get(':id')
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.providers.findOne(id);
+  @Get(':idOrSlug')
+  findOne(@Param('idOrSlug') idOrSlug: string) {
+    return this.providers.findOne(idOrSlug);
   }
 
   /** Public: a provider's rating history is the point of the platform. */
@@ -79,7 +80,10 @@ export class ProvidersController {
   @Delete(':id')
   @UseGuards(OwnershipGuard)
   @RequireOwnership({ resource: 'provider', side: 'provider' })
-  remove(@Param('id', ParseUUIDPipe) id: string) {
-    return this.providers.remove(id);
+  remove(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.providers.remove(user, id);
   }
 }

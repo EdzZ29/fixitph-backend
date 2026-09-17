@@ -20,7 +20,22 @@ function budget(envKey: string, fallback: number): number {
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-/** Sign in, register, refresh. Keyed per IP. */
+/**
+ * The general ceiling for everything that is not a named bucket: ordinary
+ * reads and writes.
+ *
+ * Tracked per signed-in user where there is one, and per IP otherwise (see
+ * ScopedThrottlerGuard), so this figure is a budget for one person rather
+ * than for one network. A dashboard screen costs several reads, and a person
+ * moving briskly through one should never meet a 429 on a list they are
+ * entitled to see.
+ */
+export const READ_THROTTLE = {
+  limit: budget('THROTTLE_DEFAULT', 600),
+  ttl: 60_000,
+} as const;
+
+/** Sign in, register, refresh. Keyed per IP for anonymous callers. */
 export const AUTH_THROTTLE = {
   register: { limit: budget('THROTTLE_REGISTER', 5), ttl: 15 * MINUTE },
   login: { limit: budget('THROTTLE_LOGIN', 10), ttl: 15 * MINUTE },

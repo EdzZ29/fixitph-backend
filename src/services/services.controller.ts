@@ -21,7 +21,7 @@ import {
 import { RolesGuard } from '../common/guards/roles.guard';
 import type { AuthenticatedUser } from '../common/types';
 import { CreateServiceDto } from './dto/create-service.dto';
-import { ListServicesDto } from './dto/list-services.dto';
+import { ListOwnServicesDto, ListServicesDto } from './dto/list-services.dto';
 import { UpdateServiceDto } from './dto/update-service.dto';
 import { ServicesService } from './services.service';
 
@@ -33,6 +33,17 @@ export class ServicesController {
   @Get()
   list(@Query() dto: ListServicesDto) {
     return this.services.list(dto);
+  }
+
+  /** The provider's own listings, drafts included. */
+  @Get('mine')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.PROVIDER)
+  listMine(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() dto: ListOwnServicesDto,
+  ) {
+    return this.services.listMine(user, dto);
   }
 
   @Public()

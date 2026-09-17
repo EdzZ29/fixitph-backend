@@ -11,7 +11,7 @@ import { UserRole } from '@prisma/client';
 import type { Request } from 'express';
 import { ApiError } from '../errors';
 import { PrismaService } from '../../prisma/prisma.service';
-import type { AuthenticatedUser } from '../types';
+import { toAuthContext, type AuthenticatedUser } from '../types';
 
 /**
  * Resources whose ownership can be checked from the URL parameter alone.
@@ -71,7 +71,7 @@ export class OwnershipGuard implements CanActivate {
         'Resource id is missing.',
       );
 
-    const owner = await this.resolveOwner(options.resource, id);
+    const owner = await this.resolveOwner(options.resource, id, user);
     if (!owner) throw ApiError.notFound('NOT_FOUND');
 
     const side = options.side ?? 'any';
@@ -97,74 +97,88 @@ export class OwnershipGuard implements CanActivate {
 
   /**
    * Resolved with the elevated (migration-owner) client deliberately: the guard
-   * has to be able to tell "someone else's row" apart from "no such row", and
-   * under RLS both look identical. Only ownership columns are read.
+   * Runs in the caller's own row level security context, which is the only
+   * context this client has: there is no elevated connection, by design.
+   *
+   * The consequence is worth stating plainly. Four of these tables are under
+   * RLS, so a row the caller has no claim on is invisible here and comes back
+   * as "no such row" — a 404 where a 403 would read better. That is a worse
+   * message, not a weaker check, and it is strictly better than the
+   * alternative this replaced: reading with *no* context at all, which made
+   * every policy clause compare against NULL and hid the row from its own
+   * owner. Every route behind this guard answered 404 to the person who
+   * owned the resource.
+   *
+   * Only ownership columns are read, whichever way it goes.
    */
   private async resolveOwner(
     resource: OwnedResource,
     id: string,
+    user: AuthenticatedUser,
   ): Promise<{
     customerId?: string | null;
     providerId?: string | null;
   } | null> {
-    switch (resource) {
-      case 'provider': {
-        const row = await this.prisma.provider.findFirst({
-          where: { id, deletedAt: null },
-          select: { id: true },
-        });
-        return row ? { providerId: row.id } : null;
+    return this.prisma.withUser(toAuthContext(user), async (tx) => {
+      switch (resource) {
+        case 'provider': {
+          const row = await tx.provider.findFirst({
+            where: { id, deletedAt: null },
+            select: { id: true },
+          });
+          return row ? { providerId: row.id } : null;
+        }
+        case 'service': {
+          const row = await tx.service.findFirst({
+            where: { id, deletedAt: null },
+            select: { providerId: true },
+          });
+          return row ? { providerId: row.providerId } : null;
+        }
+        case 'serviceRequest': {
+          const row = await tx.serviceRequest.findUnique({
+            where: { id },
+            select: { customerId: true, providerId: true },
+          });
+          return row
+            ? { customerId: row.customerId, providerId: row.providerId }
+            : null;
+        }
+        case 'quote': {
+          const row = await tx.quote.findUnique({
+            where: { id },
+            select: {
+              providerId: true,
+              serviceRequest: { select: { customerId: true } },
+            },
+          });
+          return row
+            ? {
+                providerId: row.providerId,
+                customerId: row.serviceRequest.customerId,
+              }
+            : null;
+        }
+        case 'booking': {
+          const row = await tx.booking.findFirst({
+            where: { id, deletedAt: null },
+            select: { customerId: true, providerId: true },
+          });
+          return row
+            ? { customerId: row.customerId, providerId: row.providerId }
+            : null;
+        }
+        case 'review': {
+          const row = await tx.review.findFirst({
+            where: { id, deletedAt: null },
+            select: { authorId: true, providerId: true },
+          });
+          return row
+            ? { customerId: row.authorId, providerId: row.providerId }
+            : null;
+        }
       }
-      case 'service': {
-        const row = await this.prisma.service.findFirst({
-          where: { id, deletedAt: null },
-          select: { providerId: true },
-        });
-        return row ? { providerId: row.providerId } : null;
-      }
-      case 'serviceRequest': {
-        const row = await this.prisma.serviceRequest.findUnique({
-          where: { id },
-          select: { customerId: true, providerId: true },
-        });
-        return row
-          ? { customerId: row.customerId, providerId: row.providerId }
-          : null;
-      }
-      case 'quote': {
-        const row = await this.prisma.quote.findUnique({
-          where: { id },
-          select: {
-            providerId: true,
-            serviceRequest: { select: { customerId: true } },
-          },
-        });
-        return row
-          ? {
-              providerId: row.providerId,
-              customerId: row.serviceRequest.customerId,
-            }
-          : null;
-      }
-      case 'booking': {
-        const row = await this.prisma.booking.findFirst({
-          where: { id, deletedAt: null },
-          select: { customerId: true, providerId: true },
-        });
-        return row
-          ? { customerId: row.customerId, providerId: row.providerId }
-          : null;
-      }
-      case 'review': {
-        const row = await this.prisma.review.findFirst({
-          where: { id, deletedAt: null },
-          select: { authorId: true, providerId: true },
-        });
-        return row
-          ? { customerId: row.authorId, providerId: row.providerId }
-          : null;
-      }
-    }
+    });
   }
 }
 

@@ -26,6 +26,23 @@ import { ResetPasswordDto, VerifyResetCodeDto } from './dto/reset-password.dto';
 
 const REFRESH_COOKIE = 'fixitph_rt';
 
+/**
+ * A readable companion to the refresh cookie. Carries no token and grants
+ * nothing — it exists so the browser can answer "is anyone signed in here?"
+ * without asking the API.
+ *
+ * The refresh cookie is httpOnly, which is right and which also means script
+ * cannot tell a signed-out visitor from a signed-in one. Without this flag
+ * every visitor to a public page costs an /auth/me that 401s and a refresh
+ * that 401s — two requests per page view, against a per-IP rate limit, for
+ * people who have never had an account. Plenty of this traffic shares an IP.
+ *
+ * It is a hint, never a credential: it is set and cleared alongside the real
+ * cookie, and a forged one buys nothing but the 401 that would have happened
+ * anyway.
+ */
+const SESSION_HINT_COOKIE = 'fixitph_session';
+
 @Controller('auth')
 export class AuthController {
   constructor(
@@ -36,7 +53,7 @@ export class AuthController {
 
   @Public()
   @Post('register')
-  @Throttle({ auth: AUTH_THROTTLE.register })
+  @Throttle({ default: AUTH_THROTTLE.register })
   async register(
     @Body() dto: RegisterDto,
     @Req() req: Request,
@@ -54,7 +71,7 @@ export class AuthController {
   @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ auth: AUTH_THROTTLE.login })
+  @Throttle({ default: AUTH_THROTTLE.login })
   async login(
     @Body() dto: LoginDto,
     @Req() req: Request,
@@ -68,7 +85,7 @@ export class AuthController {
   @Public()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ auth: AUTH_THROTTLE.refresh })
+  @Throttle({ default: AUTH_THROTTLE.refresh })
   async refresh(
     @Body() dto: RefreshDto,
     @Req() req: Request,
@@ -99,7 +116,7 @@ export class AuthController {
   @Public()
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ auth: AUTH_THROTTLE.forgotPassword })
+  @Throttle({ default: AUTH_THROTTLE.forgotPassword })
   async forgotPassword(@Body() dto: ForgotPasswordDto, @Req() req: Request) {
     const result = await this.passwordReset.request(dto.email, { ip: req.ip });
     // Deliberately identical whether or not the address is registered.
@@ -113,7 +130,7 @@ export class AuthController {
   @Public()
   @Post('verify-reset-code')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ auth: AUTH_THROTTLE.verifyResetCode })
+  @Throttle({ default: AUTH_THROTTLE.verifyResetCode })
   async verifyResetCode(@Body() dto: VerifyResetCodeDto) {
     return this.passwordReset.verify(dto.email, dto.code);
   }
@@ -122,7 +139,7 @@ export class AuthController {
   @Public()
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ auth: AUTH_THROTTLE.resetPassword })
+  @Throttle({ default: AUTH_THROTTLE.resetPassword })
   async resetPassword(
     @Body() dto: ResetPasswordDto,
     @Res({ passthrough: true }) res: Response,
@@ -159,24 +176,29 @@ export class AuthController {
    * plain localhost.
    */
   private setRefreshCookie(res: Response, token: string): void {
-    res.cookie(REFRESH_COOKIE, token, {
-      httpOnly: true,
-      sameSite: 'lax',
+    const shared = {
+      sameSite: 'lax' as const,
       secure: this.config.get('COOKIE_SECURE') === 'true',
       domain: this.config.get<string>('COOKIE_DOMAIN') || undefined,
       path: '/',
       maxAge: 30 * 86_400_000,
-    });
+    };
+
+    res.cookie(REFRESH_COOKIE, token, { ...shared, httpOnly: true });
+    // Deliberately readable. See SESSION_HINT_COOKIE.
+    res.cookie(SESSION_HINT_COOKIE, '1', { ...shared, httpOnly: false });
   }
 
   private clearRefreshCookie(res: Response): void {
-    res.clearCookie(REFRESH_COOKIE, {
-      httpOnly: true,
-      sameSite: 'lax',
+    const shared = {
+      sameSite: 'lax' as const,
       secure: this.config.get('COOKIE_SECURE') === 'true',
       domain: this.config.get<string>('COOKIE_DOMAIN') || undefined,
       path: '/',
-    });
+    };
+
+    res.clearCookie(REFRESH_COOKIE, { ...shared, httpOnly: true });
+    res.clearCookie(SESSION_HINT_COOKIE, { ...shared, httpOnly: false });
   }
 }
 

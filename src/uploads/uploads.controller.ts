@@ -39,7 +39,7 @@ export class UploadsController {
   @Post('provider-documents')
   @UseGuards(RolesGuard)
   @Roles(UserRole.PROVIDER, UserRole.ADMIN)
-  @Throttle({ write: WRITE_THROTTLE.upload })
+  @Throttle({ default: WRITE_THROTTLE.upload })
   @UseInterceptors(
     FileInterceptor('file', {
       limits: { fileSize: 10 * 1024 * 1024, files: 1 },
@@ -97,7 +97,7 @@ export class UploadsController {
   @Post('service-images/:serviceId')
   @UseGuards(RolesGuard)
   @Roles(UserRole.PROVIDER, UserRole.ADMIN)
-  @Throttle({ write: WRITE_THROTTLE.serviceImage })
+  @Throttle({ default: WRITE_THROTTLE.serviceImage })
   @UseInterceptors(
     FileInterceptor('file', {
       limits: { fileSize: 10 * 1024 * 1024, files: 1 },
@@ -155,14 +155,20 @@ export class UploadsController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
-    const doc = await this.prisma.providerDocument.findUnique({
-      where: { id },
-      select: {
-        storageKey: true,
-        originalFilename: true,
-        providerId: true,
-      },
-    });
+    // provider_documents is under RLS, so this read needs the caller's
+    // context: without one it returned nothing and every download 404'd,
+    // including the owner's. The explicit owner check below still stands,
+    // because an admin can see every row.
+    const doc = await this.prisma.withUser(toAuthContext(user), (tx) =>
+      tx.providerDocument.findUnique({
+        where: { id },
+        select: {
+          storageKey: true,
+          originalFilename: true,
+          providerId: true,
+        },
+      }),
+    );
     if (!doc) throw ApiError.notFound('DOCUMENT_NOT_FOUND');
 
     if (user.role !== UserRole.ADMIN && doc.providerId !== user.providerId) {

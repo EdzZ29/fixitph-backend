@@ -127,15 +127,21 @@ export class MessagesService {
     user: AuthenticatedUser,
     dto: SendMessageDto,
   ): Promise<string> {
+    // Both lookups run in the caller's own context. They are reads of a
+    // booking or request the caller is a party to, which is exactly what the
+    // policies admit; with no context set they returned nothing and sending
+    // any message failed with a 404.
     if (dto.bookingId) {
-      const booking = await this.prisma.booking.findFirst({
-        where: { id: dto.bookingId, deletedAt: null },
-        select: {
-          customerId: true,
-          providerId: true,
-          provider: { select: { userId: true } },
-        },
-      });
+      const booking = await this.prisma.withUser(toAuthContext(user), (tx) =>
+        tx.booking.findFirst({
+          where: { id: dto.bookingId, deletedAt: null },
+          select: {
+            customerId: true,
+            providerId: true,
+            provider: { select: { userId: true } },
+          },
+        }),
+      );
       if (!booking) throw ApiError.notFound('BOOKING_NOT_FOUND');
 
       if (booking.customerId === user.id) return booking.provider.userId;
@@ -147,17 +153,22 @@ export class MessagesService {
       );
     }
 
-    const request = await this.prisma.serviceRequest.findUnique({
-      where: { id: dto.serviceRequestId },
-      select: {
-        customerId: true,
-        providerId: true,
-        provider: { select: { userId: true } },
-        quotes: {
-          select: { providerId: true, provider: { select: { userId: true } } },
+    const request = await this.prisma.withUser(toAuthContext(user), (tx) =>
+      tx.serviceRequest.findUnique({
+        where: { id: dto.serviceRequestId },
+        select: {
+          customerId: true,
+          providerId: true,
+          provider: { select: { userId: true } },
+          quotes: {
+            select: {
+              providerId: true,
+              provider: { select: { userId: true } },
+            },
+          },
         },
-      },
-    });
+      }),
+    );
     if (!request) throw ApiError.notFound('REQUEST_NOT_FOUND');
 
     if (request.customerId === user.id) {

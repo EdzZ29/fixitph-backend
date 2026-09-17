@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 
 import { validateEnv } from './config/configuration';
+import { READ_THROTTLE } from './common/throttle';
 import { PrismaModule } from './prisma/prisma.module';
 import { CacheModule } from './cache/cache.module';
 import { MailModule } from './mail/mail.module';
@@ -13,6 +14,7 @@ import { ResponseInterceptor } from './common/interceptors/response.interceptor'
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { OwnershipGuard } from './common/guards/ownership.guard';
+import { ScopedThrottlerGuard } from './common/guards/scoped-throttler.guard';
 
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
@@ -29,6 +31,7 @@ import { FavoritesModule } from './favorites/favorites.module';
 import { ReportsModule } from './reports/reports.module';
 import { DisputesModule } from './disputes/disputes.module';
 import { AdminModule } from './admin/admin.module';
+import { SettingsModule } from './settings/settings.module';
 import { UploadsModule } from './uploads/uploads.module';
 import { HealthController } from './health.controller';
 
@@ -42,16 +45,30 @@ import { HealthController } from './health.controller';
     }),
 
     /**
-     * Named buckets so a route can pick the one that fits. The default applies
-     * everywhere the ThrottlerGuard runs; `auth`, `write` and `messaging` are
-     * opted into with @Throttle on the routes that need them.
+     * One bucket, tightened per route.
+     *
+     * This used to declare four named buckets, which reads as "a route picks
+     * the one that fits" but is not how the throttler works: *every* named
+     * throttler is enforced on *every* route, and @Throttle only overrides
+     * that route's budget for the bucket it names. So the auth bucket's 20
+     * requests per 15 minutes silently became the ceiling for the entire API
+     * — a signed-in person browsing a dashboard hit it in seconds, and the
+     * symptom was a 429 on an ordinary list.
+     *
+     * With a single bucket, the ceiling below is the general one and the
+     * strict budgets in common/throttle.ts are applied where they belong,
+     * with @Throttle({ default: … }). Nothing is loosened: login is still ten
+     * attempts per quarter hour. It is only applied to login now, instead of
+     * to everything.
+     *
+     * The ceiling is sized for a person rather than a request, because a
+     * dashboard screen legitimately fans out to several reads — and a
+     * signed-in caller is tracked individually by ScopedThrottlerGuard rather
+     * than sharing with everyone behind the same address.
      */
     ThrottlerModule.forRoot({
       throttlers: [
-        { name: 'default', ttl: 60_000, limit: 120 },
-        { name: 'auth', ttl: 900_000, limit: 20 },
-        { name: 'write', ttl: 3_600_000, limit: 60 },
-        { name: 'messaging', ttl: 60_000, limit: 60 },
+        { name: 'default', ttl: READ_THROTTLE.ttl, limit: READ_THROTTLE.limit },
       ],
     }),
 
@@ -74,13 +91,14 @@ import { HealthController } from './health.controller';
     ReportsModule,
     DisputesModule,
     AdminModule,
+    SettingsModule,
     UploadsModule,
   ],
   controllers: [HealthController],
   providers: [
     // Order matters. Throttling first so a flood is rejected before it costs a
     // database round trip, then authentication, then role checks.
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: ScopedThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
 

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+  NotificationType,
   Prisma,
   RequestStatus,
   UserRole,
@@ -243,7 +244,13 @@ export class RequestsService {
     return this.prisma.withUser(toAuthContext(user), async (tx) => {
       const current = await tx.serviceRequest.findUnique({
         where: { id },
-        select: { id: true, status: true, customerId: true, providerId: true },
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          customerId: true,
+          providerId: true,
+        },
       });
       if (!current) throw ApiError.notFound('REQUEST_NOT_FOUND');
 
@@ -263,7 +270,7 @@ export class RequestsService {
         );
       }
 
-      return tx.serviceRequest.update({
+      const updated = await tx.serviceRequest.update({
         where: { id },
         data: {
           status: dto.status,
@@ -274,6 +281,45 @@ export class RequestsService {
         },
         select: this.detailSelect(),
       });
+
+      /**
+       * A provider who spent time writing a quote is owed the news that the
+       * job is off, and the reason the customer gave for it — which is the
+       * only thing `dto.reason` is for. There is no column to store it on,
+       * so the notification body is where it lives.
+       *
+       * In the same transaction as the status change: a cancellation that
+       * rolled back must not leave providers told it happened.
+       */
+      if (
+        dto.status === RequestStatus.CANCELLED ||
+        dto.status === RequestStatus.CLOSED
+      ) {
+        const quoted = await tx.quote.findMany({
+          where: { serviceRequestId: id },
+          select: { provider: { select: { userId: true } } },
+          distinct: ['providerId'],
+        });
+
+        const verb =
+          dto.status === RequestStatus.CANCELLED ? 'cancelled' : 'closed';
+
+        for (const quote of quoted) {
+          await tx.notification.create({
+            data: {
+              userId: quote.provider.userId,
+              type: NotificationType.SYSTEM,
+              title: `A job you quoted for was ${verb}`,
+              body: dto.reason
+                ? `"${current.title ?? 'The request'}" was ${verb}. Reason given: ${dto.reason}`
+                : `"${current.title ?? 'The request'}" was ${verb}.`,
+              data: { serviceRequestId: id, status: dto.status },
+            },
+          });
+        }
+      }
+
+      return updated;
     });
   }
 

@@ -55,7 +55,16 @@ async function bootstrap(): Promise<void> {
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    exposedHeaders: ['X-Request-Id'],
+    // Retry-After is not a CORS-safelisted response header, so the browser
+    // hides it from script unless it is named here. With several named
+    // buckets the throttler suffixes it per bucket, so each one is listed.
+    exposedHeaders: [
+      'X-Request-Id',
+      'Retry-After',
+      'Retry-After-auth',
+      'Retry-After-write',
+      'Retry-After-messaging',
+    ],
     maxAge: 86_400,
   });
 

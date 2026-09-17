@@ -12,7 +12,10 @@ import { paginate, type Paginated } from '../common/dto/pagination.dto';
 import type { AuthenticatedUser } from '../common/types';
 import type { CreateServiceDto } from './dto/create-service.dto';
 import type { UpdateServiceDto } from './dto/update-service.dto';
-import type { ListServicesDto } from './dto/list-services.dto';
+import type {
+  ListOwnServicesDto,
+  ListServicesDto,
+} from './dto/list-services.dto';
 
 const PUBLIC_SERVICE_SELECT = {
   id: true,
@@ -43,12 +46,91 @@ const PUBLIC_SERVICE_SELECT = {
   },
 } satisfies Prisma.ServiceSelect;
 
+/**
+ * What a provider sees of their own listings. Wider than the public select: it
+ * carries status, and the counts that say whether a listing is safe to archive.
+ * It drops the provider block, because the provider is the caller.
+ */
+const OWN_SERVICE_SELECT = {
+  id: true,
+  title: true,
+  slug: true,
+  description: true,
+  pricingType: true,
+  price: true,
+  priceUnit: true,
+  minPrice: true,
+  maxPrice: true,
+  currency: true,
+  durationMinutes: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+  category: { select: { id: true, name: true, slug: true } },
+  _count: { select: { bookings: true, serviceRequests: true } },
+} satisfies Prisma.ServiceSelect;
+
 @Injectable()
 export class ServicesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
   ) {}
+
+  /**
+   * A provider's own listings. Never cached, and not filtered to ACTIVE: the
+   * whole point is to show the drafts and the paused ones that the public list
+   * deliberately hides. Scoped to the provider on the token, so there is no
+   * id in the request to tamper with.
+   */
+  async listMine(
+    user: AuthenticatedUser,
+    dto: ListOwnServicesDto,
+  ): Promise<Paginated<unknown> & { counts: Record<ServiceStatus, number> }> {
+    const providerId = this.requireOwnProvider(user);
+
+    const where: Prisma.ServiceWhereInput = {
+      providerId,
+      deletedAt: null,
+      ...(dto.status ? { status: dto.status } : {}),
+      ...(dto.categoryId ? { categoryId: dto.categoryId } : {}),
+      ...(dto.q ? { title: { contains: dto.q, mode: 'insensitive' } } : {}),
+    };
+
+    const [items, total, grouped] = await this.prisma.$transaction(
+      async (tx) =>
+        [
+          await tx.service.findMany({
+            where,
+            select: OWN_SERVICE_SELECT,
+            orderBy: [{ updatedAt: 'desc' }],
+            skip: dto.skip,
+            take: dto.limit,
+          }),
+          await tx.service.count({ where }),
+          // Tallied over every listing rather than the page, so the filter
+          // labels hold still while you page through.
+          await tx.service.groupBy({
+            by: ['status'],
+            where: { providerId, deletedAt: null },
+            _count: true,
+            orderBy: { status: 'asc' },
+          }),
+        ] as const,
+    );
+
+    const tally = new Map(grouped.map((row) => [row.status, row._count]));
+
+    return {
+      ...paginate(items, total, dto),
+      counts: {
+        [ServiceStatus.DRAFT]: tally.get(ServiceStatus.DRAFT) ?? 0,
+        [ServiceStatus.ACTIVE]: tally.get(ServiceStatus.ACTIVE) ?? 0,
+        [ServiceStatus.PAUSED]: tally.get(ServiceStatus.PAUSED) ?? 0,
+        [ServiceStatus.ARCHIVED]: tally.get(ServiceStatus.ARCHIVED) ?? 0,
+      },
+    };
+  }
 
   async list(dto: ListServicesDto): Promise<Paginated<unknown>> {
     const key = await this.cache.listKey('services', { ...dto });
@@ -211,12 +293,23 @@ export class ServicesService {
     });
     if (!existing) throw ApiError.notFound('SERVICE_NOT_FOUND');
 
+    /**
+     * What the row will look like after the patch, so coherence is checked
+     * against the result rather than against the patch.
+     *
+     * Two things this has to get right, both of which it used to get wrong:
+     * an explicit null means "this listing has no price", which is how a
+     * priced listing becomes quote-only; and a stored price of 0 is a real
+     * price, not a missing one.
+     */
     const merged = {
       pricingType: dto.pricingType ?? existing.pricingType,
       price:
         dto.price !== undefined
           ? dto.price
-          : Number(existing.price ?? 0) || undefined,
+          : existing.price !== null
+            ? Number(existing.price)
+            : null,
       priceUnit:
         dto.priceUnit !== undefined
           ? dto.priceUnit

@@ -27,7 +27,7 @@ export class ReviewsController {
   constructor(private readonly reviews: ReviewsService) {}
 
   @Post()
-  @Throttle({ write: WRITE_THROTTLE.review })
+  @Throttle({ default: WRITE_THROTTLE.review })
   create(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreateReviewDto) {
     return this.reviews.create(user, dto);
   }
@@ -50,7 +50,7 @@ export class ReviewsController {
 
   @Post(':id/report')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ write: WRITE_THROTTLE.report })
+  @Throttle({ default: WRITE_THROTTLE.report })
   report(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,

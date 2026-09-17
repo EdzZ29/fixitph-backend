@@ -77,56 +77,80 @@ export class QuotesService {
       );
     }
 
-    // Read with elevated privileges deliberately: a provider cannot yet see a
-    // broadcast request row, so we have to check eligibility before the RLS
-    // scoped write. Only the columns needed for that decision are read.
-    const request = await this.prisma.serviceRequest.findUnique({
-      where: { id: dto.serviceRequestId },
-      select: {
-        id: true,
-        status: true,
-        customerId: true,
-        providerId: true,
-        expiresAt: true,
-      },
-    });
-    if (!request) throw ApiError.notFound('REQUEST_NOT_FOUND');
-
-    if (request.providerId && request.providerId !== user.providerId) {
-      throw ApiError.forbidden(
-        'REQUEST_NOT_FOR_YOU',
-        'That request was sent to a different provider.',
-      );
-    }
-    if (
-      request.status !== RequestStatus.OPEN &&
-      request.status !== RequestStatus.QUOTED
-    ) {
-      throw ApiError.conflict(
-        'REQUEST_NOT_OPEN',
-        `That request is ${request.status.toLowerCase()} and is no longer taking quotes.`,
-      );
-    }
-    if (request.expiresAt && request.expiresAt <= new Date()) {
-      throw ApiError.conflict('REQUEST_EXPIRED', 'That request has expired.');
-    }
-
-    const existing = await this.prisma.quote.findFirst({
-      where: {
-        serviceRequestId: dto.serviceRequestId,
-        providerId: user.providerId,
-        status: { in: [QuoteStatus.PENDING, QuoteStatus.ACCEPTED] },
-      },
-      select: { id: true },
-    });
-    if (existing) {
-      throw ApiError.conflict(
-        'QUOTE_ALREADY_SENT',
-        'You already have a live quote on this request. Update or withdraw it first.',
-      );
-    }
-
+    /**
+     * Everything from here runs inside the caller's own row level security
+     * context. Deciding whether this provider may quote needs a request row
+     * they cannot necessarily see yet, and there are exactly two cases:
+     *
+     *   - A request addressed to them is visible in the base table, because
+     *     service_requests_select admits provider_id = current_provider_id().
+     *     An ordinary read settles it.
+     *   - A broadcast request is deliberately invisible until they have
+     *     quoted it. open_service_request_feed is the sanctioned read for
+     *     those: the view already restricts itself to unaddressed, OPEN or
+     *     QUOTED, unexpired rows, and carries no customer identity, no street
+     *     address and no coordinates.
+     *
+     * This used to be a single read on the request table with *no* session
+     * context at all. Every clause of the policy then compared against NULL,
+     * the row came back empty, and quoting a broadcast request always failed
+     * with a 404 — on a real deployment, though not under the superuser test
+     * harness. The comment here previously claimed elevated privileges that
+     * the client did not actually have.
+     */
     return this.prisma.withUser(toAuthContext(user), async (tx) => {
+      const addressed = await tx.serviceRequest.findUnique({
+        where: { id: dto.serviceRequestId },
+        select: { id: true, status: true, providerId: true, expiresAt: true },
+      });
+
+      if (addressed) {
+        if (addressed.providerId && addressed.providerId !== user.providerId) {
+          throw ApiError.forbidden(
+            'REQUEST_NOT_FOR_YOU',
+            'That request was sent to a different provider.',
+          );
+        }
+        if (
+          addressed.status !== RequestStatus.OPEN &&
+          addressed.status !== RequestStatus.QUOTED
+        ) {
+          throw ApiError.conflict(
+            'REQUEST_NOT_OPEN',
+            `That request is ${addressed.status.toLowerCase()} and is no longer taking quotes.`,
+          );
+        }
+        if (addressed.expiresAt && addressed.expiresAt <= new Date()) {
+          throw ApiError.conflict(
+            'REQUEST_EXPIRED',
+            'That request has expired.',
+          );
+        }
+      } else {
+        // Presence in the feed is itself the eligibility check: the view's
+        // own WHERE clause is the "open, unexpired, unaddressed" rule.
+        const open = await tx.$queryRaw<{ id: string }[]>`
+          SELECT id FROM open_service_request_feed
+          WHERE id = ${dto.serviceRequestId}::uuid
+        `;
+        if (!open.length) throw ApiError.notFound('REQUEST_NOT_FOUND');
+      }
+
+      const existing = await tx.quote.findFirst({
+        where: {
+          serviceRequestId: dto.serviceRequestId,
+          providerId: user.providerId!,
+          status: { in: [QuoteStatus.PENDING, QuoteStatus.ACCEPTED] },
+        },
+        select: { id: true },
+      });
+      if (existing) {
+        throw ApiError.conflict(
+          'QUOTE_ALREADY_SENT',
+          'You already have a live quote on this request. Update or withdraw it first.',
+        );
+      }
+
       const quote = await tx.quote.create({
         data: {
           serviceRequestId: dto.serviceRequestId,
@@ -146,22 +170,38 @@ export class QuotesService {
         select: QUOTE_SELECT,
       });
 
-      if (request.status === RequestStatus.OPEN) {
+      /**
+       * Inserting the quote is what makes the request readable to this
+       * provider — app.provider_has_quoted() returns true for it now — so the
+       * owner and the current status can be read here, and could not have
+       * been read a moment ago.
+       */
+      const request = await tx.serviceRequest.findUnique({
+        where: { id: dto.serviceRequestId },
+        select: { status: true, customerId: true },
+      });
+
+      if (request?.status === RequestStatus.OPEN) {
         await tx.serviceRequest.update({
           where: { id: dto.serviceRequestId },
           data: { status: RequestStatus.QUOTED },
         });
       }
 
-      await tx.notification.create({
-        data: {
-          userId: request.customerId,
-          type: NotificationType.QUOTE_RECEIVED,
-          title: 'You have a new quote',
-          body: `A provider quoted ${dto.amount} for your request.`,
-          data: { quoteId: quote.id, serviceRequestId: dto.serviceRequestId },
-        },
-      });
+      if (request) {
+        await tx.notification.create({
+          data: {
+            userId: request.customerId,
+            type: NotificationType.QUOTE_RECEIVED,
+            title: 'You have a new quote',
+            body: `A provider quoted ${dto.amount} for your request.`,
+            data: {
+              quoteId: quote.id,
+              serviceRequestId: dto.serviceRequestId,
+            },
+          },
+        });
+      }
 
       return quote;
     });

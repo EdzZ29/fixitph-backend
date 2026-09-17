@@ -4,6 +4,28 @@ import { CacheService, TTL } from '../cache/cache.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateCategoryDto, UpdateCategoryDto } from './dto/category.dto';
 
+/**
+ * Assembles flat category rows into a tree. Rows arrive ordered by position,
+ * and a child always finds its parent in the map because both reads fetch
+ * the whole table, so a single pass is enough.
+ */
+function buildTree<T extends { id: string; parentId: string | null }>(
+  rows: T[],
+): (T & { children: unknown[] })[] {
+  type Node = T & { children: Node[] };
+  const byId = new Map<string, Node>(
+    rows.map((row) => [row.id, { ...row, children: [] }]),
+  );
+  const roots: Node[] = [];
+
+  for (const node of byId.values()) {
+    const parent = node.parentId ? byId.get(node.parentId) : undefined;
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+  }
+  return roots;
+}
+
 @Injectable()
 export class CategoriesService {
   constructor(
@@ -13,6 +35,32 @@ export class CategoriesService {
 
   private get treeKey(): string {
     return this.cache.detailKey('categories', 'tree');
+  }
+
+  /**
+   * The full tree, hidden categories included, for the admin screen.
+   *
+   * The public tree cannot serve that screen: it filters to isActive and does
+   * not even select the column, so a category an admin hides would vanish
+   * from the only page that could bring it back. Uncached for the same
+   * reason — an admin has to see their own edit immediately.
+   */
+  async adminTree(): Promise<unknown> {
+    const rows = await this.prisma.category.findMany({
+      select: {
+        id: true,
+        parentId: true,
+        name: true,
+        slug: true,
+        description: true,
+        icon: true,
+        position: true,
+        isActive: true,
+        _count: { select: { services: true } },
+      },
+      orderBy: [{ position: 'asc' }, { name: 'asc' }],
+    });
+    return buildTree(rows);
   }
 
   /** Cached for an hour. The tree changes when an admin edits it, rarely. */
@@ -33,18 +81,7 @@ export class CategoriesService {
         orderBy: [{ position: 'asc' }, { name: 'asc' }],
       });
 
-      type Node = (typeof rows)[number] & { children: Node[] };
-      const byId = new Map<string, Node>(
-        rows.map((r) => [r.id, { ...r, children: [] }]),
-      );
-      const roots: Node[] = [];
-
-      for (const node of byId.values()) {
-        const parent = node.parentId ? byId.get(node.parentId) : undefined;
-        if (parent) parent.children.push(node);
-        else roots.push(node);
-      }
-      return roots;
+      return buildTree(rows);
     });
   }
 

@@ -183,11 +183,22 @@ async function startDatabase() {
 
   // -- error shape -----------------------------------------------------------
   console.log('\n== Error shape ==');
-  r = await fetch(`${BASE}/api/providers/not-a-uuid`);
+  // /services/:id still takes a uuid. /providers/:idOrSlug deliberately no
+  // longer does — a public profile is linked by slug — so it is checked just
+  // below for the 404 that a slug miss should give instead.
+  r = await fetch(`${BASE}/api/services/not-a-uuid`);
   b = await json(r);
   check(
     'a malformed uuid gives { success:false, message, code }',
     r.status === 400 && b.success === false && typeof b.message === 'string' && typeof b.code === 'string',
+    JSON.stringify(b),
+  );
+
+  r = await fetch(`${BASE}/api/providers/no-such-provider-slug`);
+  b = await json(r);
+  check(
+    'an unknown provider slug gives a 404, not a validation error',
+    r.status === 404 && b.code === 'PROVIDER_NOT_FOUND',
     JSON.stringify(b),
   );
 

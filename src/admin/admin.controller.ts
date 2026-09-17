@@ -22,11 +22,18 @@ import { CategoriesService } from '../categories/categories.service';
 import type { AuthenticatedUser } from '../common/types';
 import { AdminService, type AdminRequestMeta } from './admin.service';
 import {
+  ListAdminDisputesDto,
+  ListAdminReportsDto,
+  ListAdminReviewsDto,
+  ListAdminServicesDto,
   ListAdminUsersDto,
+  ModerateServiceDto,
   ResolveDisputeDto,
   ResolveReportDto,
   ReviewDocumentDto,
+  ReviewVisibilityDto,
   SuspendUserDto,
+  UpdateSettingsDto,
   VerifyProviderDto,
 } from './dto/admin.dto';
 import {
@@ -46,6 +53,13 @@ export class AdminController {
     private readonly admin: AdminService,
     private readonly categories: CategoriesService,
   ) {}
+
+  // -- overview --------------------------------------------------------------
+
+  @Get('stats')
+  stats(@CurrentUser() user: AuthenticatedUser) {
+    return this.admin.stats(user);
+  }
 
   // -- users -----------------------------------------------------------------
 
@@ -111,7 +125,65 @@ export class AdminController {
     return this.admin.reviewDocument(user, id, dto, meta(req));
   }
 
+  // -- listing moderation ----------------------------------------------------
+
+  @Get('services')
+  listServices(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() dto: ListAdminServicesDto,
+  ) {
+    return this.admin.listServices(user, dto);
+  }
+
+  @Post('services/:id/moderate')
+  @HttpCode(HttpStatus.OK)
+  moderateService(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ModerateServiceDto,
+    @Req() req: Request,
+  ) {
+    return this.admin.moderateService(user, id, dto, meta(req));
+  }
+
+  // -- review moderation -----------------------------------------------------
+
+  @Get('reviews')
+  listReviews(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() dto: ListAdminReviewsDto,
+  ) {
+    return this.admin.listReviews(user, dto);
+  }
+
+  @Post('reviews/:id/visibility')
+  @HttpCode(HttpStatus.OK)
+  setReviewVisibility(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReviewVisibilityDto,
+    @Req() req: Request,
+  ) {
+    return this.admin.setReviewVisibility(user, id, dto, meta(req));
+  }
+
   // -- moderation ------------------------------------------------------------
+
+  @Get('disputes')
+  listDisputes(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() dto: ListAdminDisputesDto,
+  ) {
+    return this.admin.listDisputes(user, dto);
+  }
+
+  @Get('reports')
+  listReports(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() dto: ListAdminReportsDto,
+  ) {
+    return this.admin.listReports(user, dto);
+  }
 
   @Post('disputes/:id/resolve')
   @HttpCode(HttpStatus.OK)
@@ -137,6 +209,12 @@ export class AdminController {
 
   // -- categories ------------------------------------------------------------
 
+  /** The whole tree, hidden categories included. */
+  @Get('categories')
+  listCategories() {
+    return this.categories.adminTree();
+  }
+
   @Post('categories')
   createCategory(@Body() dto: CreateCategoryDto) {
     return this.categories.create(dto);
@@ -148,6 +226,22 @@ export class AdminController {
     @Body() dto: UpdateCategoryDto,
   ) {
     return this.categories.update(id, dto);
+  }
+
+  // -- platform settings -----------------------------------------------------
+
+  @Get('settings')
+  listSettings(@CurrentUser() user: AuthenticatedUser) {
+    return this.admin.listSettings(user);
+  }
+
+  @Patch('settings')
+  updateSettings(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: UpdateSettingsDto,
+    @Req() req: Request,
+  ) {
+    return this.admin.updateSettings(user, dto, meta(req));
   }
 
   // -- audit -----------------------------------------------------------------

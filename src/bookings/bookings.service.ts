@@ -83,6 +83,10 @@ const BOOKING_SELECT = {
     },
   },
   service: { select: { id: true, title: true, slug: true } },
+  // Presence only, not the review itself: the list needs to know whether
+  // "Leave a review" is still an available action, and reviews.booking_id is
+  // unique so there is at most one.
+  review: { select: { id: true, rating: true } },
   serviceRequest: {
     select: {
       id: true,
@@ -274,14 +278,49 @@ export class BookingsService {
         );
       }
 
+      /**
+       * Moving a booking keeps its length.
+       *
+       * bookings_schedule_ordered requires scheduled_end > scheduled_start.
+       * A booking created from a quote with an estimated duration has an end,
+       * so moving only the start used to push it past the end and the write
+       * failed on the constraint — surfacing as a 500 rather than anything a
+       * caller could act on. Shifting the end by the same amount is both what
+       * the constraint needs and what someone rescheduling an appointment
+       * means.
+       */
+      const current = await tx.booking.findUniqueOrThrow({
+        where: { id },
+        select: { scheduledStart: true, scheduledEnd: true },
+      });
+
+      const nextStart = dto.scheduledStart
+        ? new Date(dto.scheduledStart)
+        : current.scheduledStart;
+
+      let nextEnd: Date | null = dto.scheduledEnd
+        ? new Date(dto.scheduledEnd)
+        : current.scheduledEnd;
+
+      if (dto.scheduledStart && !dto.scheduledEnd && current.scheduledEnd) {
+        const length =
+          current.scheduledEnd.getTime() - current.scheduledStart.getTime();
+        nextEnd = new Date(nextStart.getTime() + length);
+      }
+
+      if (nextEnd && nextEnd <= nextStart) {
+        throw ApiError.badRequest(
+          'SCHEDULE_ENDS_BEFORE_IT_STARTS',
+          'The end of the booking has to come after the start.',
+        );
+      }
+
       return tx.booking.update({
         where: { id },
         data: {
-          ...(dto.scheduledStart
-            ? { scheduledStart: new Date(dto.scheduledStart) }
-            : {}),
-          ...(dto.scheduledEnd
-            ? { scheduledEnd: new Date(dto.scheduledEnd) }
+          ...(dto.scheduledStart ? { scheduledStart: nextStart } : {}),
+          ...(nextEnd !== current.scheduledEnd
+            ? { scheduledEnd: nextEnd }
             : {}),
           ...(dto.paymentMethod ? { paymentMethod: dto.paymentMethod } : {}),
         },
