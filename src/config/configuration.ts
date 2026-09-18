@@ -86,6 +86,27 @@ export class EnvironmentVariables {
   @MinLength(1)
   CORS_ORIGIN!: string;
 
+  /**
+   * Sign in with Google. Optional as a set: with none of these the routes
+   * answer "not configured" and the rest of the API is unaffected, which is
+   * what lets a deployment run without a Google project.
+   *
+   * GOOGLE_CALLBACK_URL must match an Authorized redirect URI on the OAuth
+   * client exactly, including the /api prefix and the port, or Google refuses
+   * the handshake with redirect_uri_mismatch.
+   */
+  @IsString()
+  @IsOptional()
+  GOOGLE_CLIENT_ID?: string;
+
+  @IsString()
+  @IsOptional()
+  GOOGLE_CLIENT_SECRET?: string;
+
+  @IsString()
+  @IsOptional()
+  GOOGLE_CALLBACK_URL?: string;
+
   @IsInt()
   @Min(1)
   @IsOptional()

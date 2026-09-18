@@ -2,11 +2,13 @@ import {
   Body,
   Controller,
   Get,
+  UseGuards,
   HttpCode,
   HttpStatus,
   Post,
   Req,
   Res,
+  UseFilters,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Throttle } from '@nestjs/throttler';
@@ -17,6 +19,12 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import type { AuthenticatedUser } from '../common/types';
 import { AuthService, type RequestMeta } from './auth.service';
+import { GoogleAuthService, type GoogleProfile } from './google-auth.service';
+import { GoogleAuthGuard } from './guards/google-auth.guard';
+import {
+  OAuthRedirectFilter,
+  frontendOrigin,
+} from './filters/oauth-redirect.filter';
 import { PasswordResetService } from './password-reset.service';
 import { EmailVerificationService } from './email-verification.service';
 import { ConfirmEmailDto } from './dto/confirm-email.dto';
@@ -51,8 +59,62 @@ export class AuthController {
     private readonly auth: AuthService,
     private readonly passwordReset: PasswordResetService,
     private readonly emailVerification: EmailVerificationService,
+    private readonly googleAuth: GoogleAuthService,
     private readonly config: ConfigService,
   ) {}
+
+  // -- sign in with Google ---------------------------------------------------
+
+  /**
+   * Hands the browser to Google. The guard mints the CSRF state and sets the
+   * cookie it is pinned to; passport issues the redirect, so this body is
+   * never reached.
+   */
+  @Public()
+  @Get('google')
+  @Throttle({ default: AUTH_THROTTLE.login })
+  @UseGuards(GoogleAuthGuard)
+  @UseFilters(OAuthRedirectFilter)
+  googleStart(): void {
+    /* passport redirects */
+  }
+
+  /**
+   * Where Google sends the browser back.
+   *
+   * This is a navigation, not an API call, so nothing here may answer with
+   * JSON: whatever happens, the person ends up on a FixItPH page. Success
+   * sets the same cookies a password login would and lands them on the site;
+   * every failure lands on /login with a code the page can put into words.
+   */
+  @Public()
+  @Get('google/callback')
+  @UseGuards(GoogleAuthGuard)
+  @UseFilters(OAuthRedirectFilter)
+  async googleCallback(
+    @Req() req: Request,
+    @Res() res: Response,
+  ): Promise<void> {
+    // The guard has already checked the CSRF state and passport has already
+    // exchanged the code, so by here there is a profile or there is nothing.
+    const profile = req.user as GoogleProfile | undefined;
+    if (!profile) {
+      throw ApiError.unauthenticated(
+        'OAUTH_FAILED',
+        'Google did not return an account.',
+      );
+    }
+
+    // Anything thrown from here lands in OAuthRedirectFilter, which turns it
+    // into a page rather than a JSON body in a blank tab.
+    const tokens = await this.googleAuth.signIn(profile, meta(req));
+    this.setRefreshCookie(res, tokens.refreshToken);
+
+    // No access token in the URL. The page asks for one with the refresh
+    // cookie the moment it loads, which is the same path every other tab
+    // takes, and keeps the token out of history and out of server logs.
+    res.redirect(`${frontendOrigin(this.config)}/auth/google/return`);
+  }
 
   // -- email verification ----------------------------------------------------
 

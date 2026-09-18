@@ -7,6 +7,10 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { PasswordResetService } from './password-reset.service';
 import { EmailVerificationService } from './email-verification.service';
+import { GoogleAuthService } from './google-auth.service';
+import { GoogleStrategy } from './strategies/google.strategy';
+import { GoogleAuthGuard } from './guards/google-auth.guard';
+import { OAuthRedirectFilter } from './filters/oauth-redirect.filter';
 import { JwtStrategy } from './strategies/jwt.strategy';
 
 @Module({
@@ -32,7 +36,26 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     AuthService,
     PasswordResetService,
     EmailVerificationService,
+    GoogleAuthService,
+    GoogleAuthGuard,
+    OAuthRedirectFilter,
     JwtStrategy,
+    {
+      /**
+       * Registered only when Google is actually configured.
+       *
+       * Constructing a passport OAuth strategy without a client id throws, so
+       * an unconfigured deployment would fail to boot over a feature it does
+       * not use. Returning null leaves the 'google' strategy unregistered and
+       * GoogleAuthGuard answers the routes with a clear message instead.
+       */
+      provide: GoogleStrategy,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) =>
+        config.get<string>('GOOGLE_CLIENT_ID')
+          ? new GoogleStrategy(config)
+          : null,
+    },
   ],
   exports: [AuthService, PasswordResetService],
 })

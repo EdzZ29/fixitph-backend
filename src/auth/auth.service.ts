@@ -144,9 +144,25 @@ export class AuthService {
       );
     }
 
-    const valid = await argon2
-      .verify(user.passwordHash, dto.password)
-      .catch(() => false);
+    /**
+     * An account with no password is one that only signs in through Google.
+     *
+     * The dummy hash is still verified against, for the same reason an
+     * unknown address is: skipping the work here would make a Google-only
+     * account answer measurably faster than one with a password, which turns
+     * login into an oracle for how somebody signed up.
+     *
+     * The message stays the generic one. Saying "this account uses Google"
+     * would confirm the address is registered, which nothing else on this
+     * route does — the login page carries that hint instead, where it is
+     * shown to everyone and reveals nothing.
+     */
+    const valid = user.passwordHash
+      ? await argon2.verify(user.passwordHash, dto.password).catch(() => false)
+      : await argon2
+          .verify(DUMMY_HASH, dto.password)
+          .catch(() => false)
+          .then(() => false);
 
     if (!valid) {
       await this.registerFailedAttempt(user.id, user.failedLoginCount);
@@ -209,6 +225,27 @@ export class AuthService {
   }
 
   // -- tokens ----------------------------------------------------------------
+
+  /**
+   * A session for a caller that has already established who the person is by
+   * some other means — today, a completed Google sign-in.
+   *
+   * A thin public door onto issueTokens rather than making that method public:
+   * everything it can be used for still runs through one implementation, so a
+   * second way in cannot end up with a subtly different token, a different
+   * refresh family, or no refresh row at all.
+   */
+  async issueTokensFor(
+    user: {
+      id: string;
+      email: string;
+      role: UserRole;
+      providerId: string | null;
+    },
+    meta: RequestMeta,
+  ): Promise<TokenPair> {
+    return this.issueTokens(user, meta);
+  }
 
   private async issueTokens(
     user: {

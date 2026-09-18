@@ -265,10 +265,13 @@ export class PasswordResetService {
     }
 
     // Reusing the old password would leave the account exactly as exposed as
-    // whatever prompted the reset.
-    const sameAsOld = await argon2
-      .verify(record.user.passwordHash, newPassword)
-      .catch(() => false);
+    // whatever prompted the reset. A Google-only account has no old password
+    // to reuse, and setting one here is how it gains a second way in.
+    const sameAsOld = record.user.passwordHash
+      ? await argon2
+          .verify(record.user.passwordHash, newPassword)
+          .catch(() => false)
+      : false;
     if (sameAsOld) {
       throw ApiError.badRequest(
         'PASSWORD_UNCHANGED',

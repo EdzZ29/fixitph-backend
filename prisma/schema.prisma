@@ -325,7 +325,9 @@ model User {
   id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email             String     @unique @db.Citext
   phone             String?    @unique @db.VarChar(20)
-  passwordHash      String     @map("password_hash") @db.Text
+  /// Null for an account that only signs in through Google. Login treats
+  /// that as "no password set" rather than as a password that never matches.
+  passwordHash      String?    @map("password_hash") @db.Text
   role              UserRole   @default(CUSTOMER)
   status            UserStatus @default(PENDING_VERIFICATION)
   emailVerifiedAt   DateTime?  @map("email_verified_at") @db.Timestamptz(6)
@@ -344,6 +346,7 @@ model User {
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
   emailVerifications  EmailVerificationToken[]
+  oauthAccounts       OAuthAccount[]
   serviceRequests     ServiceRequest[]       @relation("CustomerServiceRequests")
   bookings            Booking[]              @relation("CustomerBookings")
   bookingsCancelled   Booking[]              @relation("BookingCancelledBy")
@@ -396,6 +399,37 @@ model Profile {
 
 /// Rotating refresh tokens. Only the hash is stored. `familyId` groups a
 /// rotation chain so that replaying a used token can revoke the whole family.
+/// Which external identity provider an OAuthAccount belongs to. An enum
+/// rather than free text so a typo cannot quietly create a second namespace
+/// of account ids that nothing matches.
+enum OAuthProvider {
+  GOOGLE
+}
+
+/// A link between a FixItPH account and an identity somewhere else.
+///
+/// Its own table rather than a google_id column on users: the unique key that
+/// matters is (provider, provider_account_id), a second provider is then a new
+/// row rather than a new column, and unlinking is a delete.
+model OAuthAccount {
+  id       String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId   String        @map("user_id") @db.Uuid
+  provider OAuthProvider
+  /// Google's stable subject id. Not the email: an email can be reassigned by
+  /// a Workspace administrator, the subject id cannot.
+  providerAccountId String @map("provider_account_id") @db.VarChar(255)
+  /// The address Google asserted at link time, kept for support questions.
+  email       String    @db.Citext
+  linkedAt    DateTime  @default(now()) @map("linked_at") @db.Timestamptz(6)
+  lastLoginAt DateTime? @map("last_login_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("oauth_accounts")
+}
+
 model RefreshToken {
   id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId     String    @map("user_id") @db.Uuid
