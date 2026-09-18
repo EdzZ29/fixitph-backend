@@ -18,6 +18,8 @@ import { Public } from '../common/decorators/public.decorator';
 import type { AuthenticatedUser } from '../common/types';
 import { AuthService, type RequestMeta } from './auth.service';
 import { PasswordResetService } from './password-reset.service';
+import { EmailVerificationService } from './email-verification.service';
+import { ConfirmEmailDto } from './dto/confirm-email.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
@@ -48,8 +50,41 @@ export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly passwordReset: PasswordResetService,
+    private readonly emailVerification: EmailVerificationService,
     private readonly config: ConfigService,
   ) {}
+
+  // -- email verification ----------------------------------------------------
+
+  /**
+   * Two steps, and both require a session.
+   *
+   * Unlike password reset, which is anonymous and must never reveal whether
+   * an address is registered, this verifies the caller's *own* address — so
+   * there is no enumeration oracle to protect and the errors can say what
+   * actually went wrong.
+   */
+  @Get('email/status')
+  emailStatus(@CurrentUser() user: AuthenticatedUser) {
+    return this.emailVerification.status(user);
+  }
+
+  @Post('email/send-code')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: AUTH_THROTTLE.forgotPassword })
+  sendEmailCode(@CurrentUser() user: AuthenticatedUser, @Req() req: Request) {
+    return this.emailVerification.send(user, { ip: req.ip });
+  }
+
+  @Post('email/confirm')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: AUTH_THROTTLE.verifyResetCode })
+  confirmEmail(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ConfirmEmailDto,
+  ) {
+    return this.emailVerification.confirm(user, dto.code);
+  }
 
   @Public()
   @Post('register')

@@ -418,7 +418,20 @@ export class AuthService {
     role: UserRole;
     providerId: string | null;
     sid: string;
+    typ?: string;
   }): Promise<AuthenticatedUser | null> {
+    /**
+     * Only a token minted as a session token gets in.
+     *
+     * Other tokens are signed with the same secret and issuer — the event
+     * stream ticket is one — and every one of them carries a subject. Without
+     * this check, any of them would be spendable here as an access token,
+     * which would make a ticket handed out in a URL exactly as dangerous as
+     * the token it was introduced to avoid putting there. A session id is
+     * what an access token has and the others do not.
+     */
+    if (payload.typ !== undefined || !payload.sid) return null;
+
     const user = await this.prisma.user.findFirst({
       where: { id: payload.sub, deletedAt: null },
       select: {

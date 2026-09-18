@@ -1,15 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  PutObjectCommand,
-  S3Client,
-} from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHash, randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import { ApiError } from '../common/errors';
 import { DOCUMENT_MIMES, detectFileType, isAllowed } from './file-type';
+import {
+  LocalStorageDriver,
+  S3StorageDriver,
+  type StorageDriver,
+} from './storage';
 
 export interface StoredObject {
   storageKey: string;
@@ -29,7 +28,7 @@ export interface UploadedFile {
 @Injectable()
 export class UploadsService {
   private readonly logger = new Logger(UploadsService.name);
-  private readonly client: S3Client;
+  private readonly driver: StorageDriver;
   private readonly bucket: string;
   private readonly signedUrlTtl: number;
   private readonly maxBytes: number;
@@ -39,18 +38,70 @@ export class UploadsService {
     this.signedUrlTtl = config.get<number>('SIGNED_URL_TTL_SECONDS', 300);
     this.maxBytes = config.get<number>('MAX_UPLOAD_BYTES', 10 * 1024 * 1024);
 
-    const accessKeyId = config.get<string>('S3_ACCESS_KEY_ID');
-    const secretAccessKey = config.get<string>('S3_SECRET_ACCESS_KEY');
+    this.driver = this.buildDriver();
+    this.logger.log(`Uploads are stored in ${this.driver.name}.`);
+    if (this.driver instanceof LocalStorageDriver) this.driver.logLocation();
+  }
 
-    this.client = new S3Client({
-      region: config.get<string>('S3_REGION', 'ap-southeast-1'),
-      endpoint: config.get<string>('S3_ENDPOINT') || undefined,
-      // MinIO and most S3-compatible dev servers need path style addressing.
-      forcePathStyle: config.get('S3_FORCE_PATH_STYLE') === 'true',
-      ...(accessKeyId && secretAccessKey
-        ? { credentials: { accessKeyId, secretAccessKey } }
-        : {}),
-    });
+  /**
+   * Chooses where files go.
+   *
+   * STORAGE_DRIVER decides it outright. Left unset, the object store is used
+   * when it has actually been configured and local disk otherwise — so a
+   * checkout with no S3 settings works immediately, instead of failing every
+   * upload with a connection error, which is what used to happen.
+   *
+   * It never falls back at runtime. A deployment that loses its bucket
+   * mid-flight has to fail loudly, not quietly start writing somewhere else
+   * and split the files across two places.
+   *
+   * Read once, at boot. Changing STORAGE_DRIVER means restarting the API —
+   * the config is cached, so editing .env under a running process has no
+   * effect and the old driver stays in use.
+   */
+  private buildDriver(): StorageDriver {
+    const endpoint = this.config.get<string>('S3_ENDPOINT');
+    const accessKeyId = this.config.get<string>('S3_ACCESS_KEY_ID');
+    const secretAccessKey = this.config.get<string>('S3_SECRET_ACCESS_KEY');
+
+    const configured = this.config.get<string>('STORAGE_DRIVER')?.toLowerCase();
+    const chosen =
+      configured === 's3' || configured === 'local'
+        ? configured
+        : accessKeyId && secretAccessKey
+          ? 's3'
+          : 'local';
+
+    if (chosen === 's3') {
+      return S3StorageDriver.create({
+        region: this.config.get<string>('S3_REGION', 'ap-southeast-1'),
+        endpoint,
+        // MinIO and most S3-compatible dev servers need path style addressing.
+        forcePathStyle: this.config.get('S3_FORCE_PATH_STYLE') === 'true',
+        accessKeyId,
+        secretAccessKey,
+        bucket: this.bucket,
+      });
+    }
+
+    return new LocalStorageDriver(
+      resolve(
+        process.cwd(),
+        this.config.get<string>('LOCAL_STORAGE_PATH', 'storage/uploads'),
+      ),
+      // Reuses the access-token secret: already required, already long, and
+      // already rotated with the deployment. A separate one would be another
+      // thing to forget to set.
+      this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+      withoutTrailingSlash(
+        this.config.get<string>('PUBLIC_API_URL', 'http://localhost:4000/api'),
+      ),
+    );
+  }
+
+  /** Lets the controller serve a locally stored file behind a signed link. */
+  get localDriver(): LocalStorageDriver | null {
+    return this.driver instanceof LocalStorageDriver ? this.driver : null;
   }
 
   /**
@@ -105,19 +156,11 @@ export class UploadsService {
     // name like "../../etc/passwd" has nowhere to go.
     const storageKey = `${prefix}/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${detected.extension}`;
 
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: storageKey,
-        Body: file.buffer,
-        ContentType: detected.mime,
-        // Forces a download rather than inline rendering, which neutralises
-        // anything that slipped through pretending to be an image.
-        ContentDisposition: 'attachment',
-        ChecksumSHA256: Buffer.from(checksum, 'hex').toString('base64'),
-        Metadata: { 'original-filename': sanitiseFilename(file.originalname) },
-      }),
-    );
+    try {
+      await this.driver.put(storageKey, file.buffer, detected.mime);
+    } catch (cause) {
+      throw this.storageFailure(cause, 'store');
+    }
 
     return {
       storageKey,
@@ -136,27 +179,73 @@ export class UploadsService {
     storageKey: string,
     downloadName?: string,
   ): Promise<{ url: string; expiresIn: number }> {
-    const url = await getSignedUrl(
-      this.client,
-      new GetObjectCommand({
-        Bucket: this.bucket,
-        Key: storageKey,
-        ...(downloadName
-          ? {
-              ResponseContentDisposition: `attachment; filename="${sanitiseFilename(downloadName)}"`,
-            }
-          : {}),
-      }),
-      { expiresIn: this.signedUrlTtl },
+    // Signing reaches no network on either driver, so it cannot fail on
+    // connectivity. Wrapped because a misconfigured client (no credentials,
+    // bad region) throws here and should read the same way.
+    const url = await this.driver.signedUrl(
+      storageKey,
+      this.signedUrlTtl,
+      downloadName ? sanitiseFilename(downloadName) : undefined,
     );
     return { url, expiresIn: this.signedUrlTtl };
   }
 
-  async remove(storageKey: string): Promise<void> {
-    await this.client.send(
-      new DeleteObjectCommand({ Bucket: this.bucket, Key: storageKey }),
+  /**
+   * Turns a storage fault into something the caller can act on.
+   *
+   * Object storage being unreachable is an operational problem, not a bad
+   * request, and it used to surface as a bare 500 INTERNAL_ERROR — which told
+   * a provider staring at a failed photo upload nothing at all, and told
+   * whoever was on call nothing either. A 503 with a plain message is honest
+   * about whose fault it is and that retrying later is the right move.
+   *
+   * The underlying error is logged rather than returned: it carries the
+   * bucket endpoint and credentials shape, which are not the client's
+   * business.
+   */
+  private storageFailure(cause: unknown, operation: string): ApiError {
+    const offline =
+      cause instanceof Error &&
+      /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up/i.test(
+        `${cause.name} ${cause.message} ${'code' in cause ? String(cause.code) : ''}`,
+      );
+
+    this.logger.error(
+      `Storage ${operation} failed${offline ? ' (storage unreachable)' : ''}: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+
+    return new ApiError(
+      offline ? 'STORAGE_UNAVAILABLE' : 'STORAGE_FAILED',
+      offline
+        ? 'File storage is not reachable right now, so the upload could not be saved. Please try again shortly.'
+        : 'The file could not be saved. Please try again.',
+      503,
     );
   }
+
+  async remove(storageKey: string): Promise<void> {
+    try {
+      await this.driver.remove(storageKey);
+    } catch (cause) {
+      // A failed delete leaves an orphan, which is untidy but harmless: the
+      // row that pointed at it has already moved on. Never worth failing the
+      // request the caller actually made.
+      this.logger.warn(
+        `Could not remove ${storageKey}: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
+    }
+  }
+}
+
+/** "http://host/api/" -> "http://host/api", so joining a path is predictable. */
+function withoutTrailingSlash(url: string): string {
+  let trimmed = url;
+  while (trimmed.endsWith('/')) trimmed = trimmed.slice(0, -1);
+  return trimmed;
 }
 
 /** Strips path separators and control characters from a client-supplied name. */

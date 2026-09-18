@@ -7,6 +7,8 @@ import { validateEnv } from './config/configuration';
 import { READ_THROTTLE } from './common/throttle';
 import { PrismaModule } from './prisma/prisma.module';
 import { CacheModule } from './cache/cache.module';
+import { EventsModule } from './events/events.module';
+import { ChangePublishInterceptor } from './events/change-publish.interceptor';
 import { MailModule } from './mail/mail.module';
 
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
@@ -74,6 +76,7 @@ import { HealthController } from './health.controller';
 
     PrismaModule,
     CacheModule,
+    EventsModule,
     MailModule,
 
     AuthModule,
@@ -103,6 +106,8 @@ import { HealthController } from './health.controller';
     { provide: APP_GUARD, useClass: RolesGuard },
 
     { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },
+    // After the envelope, so it only ever sees a request that succeeded.
+    { provide: APP_INTERCEPTOR, useClass: ChangePublishInterceptor },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
 
     // Not global: applied per route with @RequireOwnership.

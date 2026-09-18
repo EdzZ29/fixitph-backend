@@ -9,6 +9,15 @@ import { ApiError } from '../common/errors';
 import { CacheService, TTL } from '../cache/cache.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { paginate, type Paginated } from '../common/dto/pagination.dto';
+import {
+  attachVerification,
+  type VerifiableProvider,
+  type VerificationApprovals,
+} from '../providers/verification';
+import {
+  approvalsFor,
+  readApprovals,
+} from '../providers/verification.repository';
 import type { AuthenticatedUser } from '../common/types';
 import type { CreateServiceDto } from './dto/create-service.dto';
 import type { UpdateServiceDto } from './dto/update-service.dto';
@@ -42,9 +51,34 @@ const PUBLIC_SERVICE_SELECT = {
       ratingAvg: true,
       ratingCount: true,
       verificationStatus: true,
+      /**
+       * Read so the provider's badges can be derived, then dropped by
+       * attachVerification before anything is returned or cached.
+       *
+       * A service card shows the provider's name, and a verification mark
+       * beside a name has to mean the same thing everywhere it appears.
+       * Without this the payload could only offer verificationStatus, which
+       * says an administrator let them trade — a weaker claim wearing the
+       * same tick.
+       */
+      providerType: true,
+      user: { select: { emailVerifiedAt: true } },
     },
   },
 } satisfies Prisma.ServiceSelect;
+
+/** One service, with its provider's evidence swapped for their badges. */
+function withProviderVerification<
+  T extends { provider: VerifiableProvider & Record<string, unknown> },
+>(service: T, approvals: Map<string, VerificationApprovals>) {
+  return {
+    ...service,
+    provider: attachVerification(
+      service.provider,
+      approvalsFor(approvals, service.provider.id),
+    ),
+  };
+}
 
 /**
  * What a provider sees of their own listings. Wider than the public select: it
@@ -184,14 +218,22 @@ export class ServicesService {
         this.prisma.service.count({ where }),
       ]);
 
-      return paginate(items, total, dto);
+      const approvals = await readApprovals(
+        this.prisma,
+        items.map((item) => item.provider.id),
+      );
+      return paginate(
+        items.map((item) => withProviderVerification(item, approvals)),
+        total,
+        dto,
+      );
     });
   }
 
   async findOne(id: string): Promise<unknown> {
     const key = this.cache.detailKey('services', id);
-    const service = await this.cache.wrap(key, TTL.DETAIL, async () =>
-      this.prisma.service.findFirst({
+    const service = await this.cache.wrap(key, TTL.DETAIL, async () => {
+      const row = await this.prisma.service.findFirst({
         where: { id, deletedAt: null },
         select: {
           ...PUBLIC_SERVICE_SELECT,
@@ -206,8 +248,11 @@ export class ServicesService {
             orderBy: { position: 'asc' },
           },
         },
-      }),
-    );
+      });
+      if (!row) return null;
+      const approvals = await readApprovals(this.prisma, [row.provider.id]);
+      return withProviderVerification(row, approvals);
+    });
     if (!service)
       throw ApiError.notFound(
         'SERVICE_NOT_FOUND',
@@ -276,7 +321,8 @@ export class ServicesService {
 
     await this.cache.invalidateLists('services');
     await this.cache.invalidateResource('providers', providerId);
-    return service;
+    const approvals = await readApprovals(this.prisma, [service.provider.id]);
+    return withProviderVerification(service, approvals);
   }
 
   async update(id: string, dto: UpdateServiceDto): Promise<unknown> {
@@ -363,7 +409,8 @@ export class ServicesService {
 
     await this.cache.invalidateResource('services', id);
     await this.cache.invalidateResource('providers', existing.providerId);
-    return service;
+    const approvals = await readApprovals(this.prisma, [service.provider.id]);
+    return withProviderVerification(service, approvals);
   }
 
   /** Soft delete, because bookings reference the service. */

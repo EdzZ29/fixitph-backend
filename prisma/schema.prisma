@@ -70,6 +70,15 @@ enum DocumentType {
   @@map("document_type")
 }
 
+/// Whether a provider trades as a person or as a registered business. Decides
+/// which documents verification asks for, and how the profile reads.
+enum ProviderType {
+  INDIVIDUAL
+  BUSINESS
+
+  @@map("provider_type")
+}
+
 enum PricingType {
   FIXED
   HOURLY
@@ -334,6 +343,7 @@ model User {
   provider            Provider?
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
+  emailVerifications  EmailVerificationToken[]
   serviceRequests     ServiceRequest[]       @relation("CustomerServiceRequests")
   bookings            Booking[]              @relation("CustomerBookings")
   bookingsCancelled   Booking[]              @relation("BookingCancelledBy")
@@ -415,6 +425,37 @@ model RefreshToken {
 ///
 /// A 6 digit code is only 20 bits, so it is protected by a short expiry, a
 /// hard attempt limit, and a lockout rather than by its own entropy.
+/// A short code emailed to confirm an address belongs to the person using it.
+///
+/// Same shape as PasswordResetToken and for the same reasons: the code is
+/// stored only as an argon2id hash, wrong guesses are counted, and too many
+/// locks the request rather than the account. Deliberately a separate table —
+/// a reset token can change a password, and nothing that only proves "this
+/// inbox is reachable" should ever be spendable for that.
+model EmailVerificationToken {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  /// The address being proved. Kept so a code issued for a previous address
+  /// cannot confirm a new one after a change of email.
+  email        String    @db.Citext
+  /// argon2id hash of the emailed code. The code itself is never stored.
+  codeHash     String    @map("code_hash") @db.Text
+  /// Wrong codes entered against this request.
+  attemptCount Int       @default(0) @map("attempt_count")
+  /// Set once attemptCount hits the limit. Blocks further guesses.
+  lockedUntil  DateTime? @map("locked_until") @db.Timestamptz(6)
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt       DateTime? @map("used_at") @db.Timestamptz(6)
+  requestedIp  String?   @map("requested_ip") @db.Inet
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([expiresAt])
+  @@map("email_verification_tokens")
+}
+
 model PasswordResetToken {
   id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId       String    @map("user_id") @db.Uuid
@@ -448,10 +489,15 @@ model PasswordResetToken {
 model Provider {
   id                  String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId              String             @unique @map("user_id") @db.Uuid
+  providerType        ProviderType       @default(INDIVIDUAL) @map("provider_type")
   businessName        String             @map("business_name") @db.VarChar(160)
   slug                String             @unique @db.VarChar(160)
   headline            String?            @db.VarChar(200)
   bio                 String?            @db.Text
+  /// Private bucket keys, served as short-lived signed URLs like every other
+  /// upload. Null means the profile falls back to initials and a flat header.
+  avatarKey           String?            @map("avatar_key") @db.Text
+  coverKey            String?            @map("cover_key") @db.Text
   yearsExperience     Int?               @map("years_experience")
   verificationStatus  VerificationStatus @default(UNVERIFIED) @map("verification_status")
   verifiedAt          DateTime?          @map("verified_at") @db.Timestamptz(6)

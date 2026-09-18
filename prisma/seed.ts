@@ -10,12 +10,14 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   PrismaClient,
+  DocumentType,
   PricingType,
   ServiceStatus,
   UserRole,
   UserStatus,
   VerificationStatus,
 } from '@prisma/client';
+import { createHash } from 'node:crypto';
 
 // The Prisma CLI loads .env for its own commands, but this file is run
 // directly by ts-node, which does not. Without this the seed fails with
@@ -64,7 +66,7 @@ async function main(): Promise<void> {
   });
 
   // -- admin ----------------------------------------------------------------
-  await prisma.user.upsert({
+  const adminUser = await prisma.user.upsert({
     where: { email: 'admin@fixitph.test' },
     create: {
       email: 'admin@fixitph.test',
@@ -144,6 +146,39 @@ async function main(): Promise<void> {
     },
     update: {},
   });
+
+  /**
+   * The document the approval rests on.
+   *
+   * Badges are derived from approved documents, so a provider marked APPROVED
+   * with nothing behind it is a state the API itself would refuse to create —
+   * the admin endpoint will not approve a provider with no approved document.
+   * Seeding it means the seeded provider carries the Identity Verified badge
+   * it has clearly earned, rather than an approval with no evidence.
+   */
+  const existingDocument = await prisma.providerDocument.findFirst({
+    where: { providerId: provider.id, documentType: DocumentType.GOVERNMENT_ID },
+  });
+
+  if (!existingDocument) {
+    const placeholder = Buffer.from('seed placeholder, not a real document');
+    await prisma.providerDocument.create({
+      data: {
+        providerId: provider.id,
+        documentType: DocumentType.GOVERNMENT_ID,
+        // Points at nothing: the seed has no file to upload, and no code path
+        // reads a document body without an administrator asking for it.
+        storageKey: `provider-documents/${provider.id}/seed-government-id`,
+        originalFilename: 'seed-government-id.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: placeholder.byteLength,
+        checksumSha256: createHash('sha256').update(placeholder).digest('hex'),
+        status: VerificationStatus.APPROVED,
+        reviewedById: adminUser.id,
+        reviewedAt: new Date(),
+      },
+    });
+  }
 
   const existingService = await prisma.service.findFirst({
     where: { providerId: provider.id, slug: 'split-type-aircon-cleaning' },

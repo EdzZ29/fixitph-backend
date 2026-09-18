@@ -6,6 +6,7 @@ import { ttlToSeconds } from '../config/configuration';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { PasswordResetService } from './password-reset.service';
+import { EmailVerificationService } from './email-verification.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 
 @Module({
@@ -27,7 +28,12 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, PasswordResetService, JwtStrategy],
+  providers: [
+    AuthService,
+    PasswordResetService,
+    EmailVerificationService,
+    JwtStrategy,
+  ],
   exports: [AuthService, PasswordResetService],
 })
 export class AuthModule {}

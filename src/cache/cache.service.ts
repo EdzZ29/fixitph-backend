@@ -1,6 +1,7 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Cache } from 'cache-manager';
+import { ChangeFeedService } from '../events/change-feed.service';
 import { createHash } from 'node:crypto';
 
 /** Cache windows, in milliseconds, exactly as the caching strategy specifies. */
@@ -41,7 +42,10 @@ export class CacheService {
   /** Logged once per process, not once per request, during an outage. */
   private degraded = false;
 
-  constructor(@Inject(CACHE_MANAGER) private readonly cache: Cache) {}
+  constructor(
+    @Inject(CACHE_MANAGER) private readonly cache: Cache,
+    private readonly feed: ChangeFeedService,
+  ) {}
 
   /** Resolves to `fallback` if the cache does not answer in time or throws. */
   private async guard<T>(
@@ -173,6 +177,17 @@ export class CacheService {
       () => this.cache.set(this.versionKey(ns), next, 0),
       undefined,
     );
+
+    /**
+     * Anyone reading this resource is now looking at something out of date.
+     *
+     * This is the right place to say so, and it is the reason the change feed
+     * needed no new call sites for the public data: every write that makes a
+     * cached listing stale already calls this, because it had to. A separate
+     * set of publish() calls would be a second list of the same thing, and
+     * the two would drift the first time somebody added an endpoint.
+     */
+    this.feed.publish(ns);
   }
 
   /**

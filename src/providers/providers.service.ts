@@ -1,13 +1,37 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, UserRole, VerificationStatus } from '@prisma/client';
+import {
+  DocumentType,
+  Prisma,
+  ProviderType,
+  UserRole,
+  VerificationStatus,
+} from '@prisma/client';
 import { ApiError } from '../common/errors';
 import { CacheService, TTL } from '../cache/cache.service';
+import { UploadsService } from '../uploads/uploads.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { paginate, type Paginated } from '../common/dto/pagination.dto';
 import { toAuthContext, type AuthenticatedUser } from '../common/types';
 import type { CreateProviderDto } from './dto/create-provider.dto';
 import type { UpdateProviderDto } from './dto/update-provider.dto';
 import type { SearchProvidersDto } from './dto/search-providers.dto';
+import { attachVerification } from './verification';
+import { withTimesOfDay } from './time-of-day';
+import { approvalsFor, readApprovals } from './verification.repository';
+
+/**
+ * The half of the badge computation that a public read can do for itself.
+ *
+ * The other half — whether an administrator approved an identity or business
+ * document — cannot be selected here at all: provider_documents is under row
+ * level security and a public read has no session, so the join came back
+ * empty and every provider looked unverified. It is read from
+ * provider_public_verification instead, which publishes the conclusion
+ * without the documents.
+ */
+const VERIFICATION_SELECT = {
+  user: { select: { emailVerifiedAt: true } },
+} as const;
 
 /**
  * Tells a uuid path parameter from a slug. Slugs are generated from the
@@ -20,7 +44,10 @@ const UUID_PATTERN =
 const PUBLIC_PROVIDER_SELECT = {
   id: true,
   slug: true,
+  providerType: true,
   businessName: true,
+  avatarKey: true,
+  coverKey: true,
   headline: true,
   bio: true,
   yearsExperience: true,
@@ -44,7 +71,41 @@ export class ProvidersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
+    private readonly uploads: UploadsService,
   ) {}
+
+  /**
+   * Swaps the private bucket keys for short-lived signed URLs.
+   *
+   * Deliberately applied *after* the cache, not inside it: a signed URL
+   * expires, and a cached one would be dead by the end of the cache window.
+   * Presigning is a local HMAC with no round trip, so doing it per response —
+   * and per row on a search page — costs nothing worth saving.
+   *
+   * The keys themselves never leave the server, which is the rule the rest of
+   * the upload code already follows.
+   */
+  private async withImages<
+    T extends { avatarKey?: string | null; coverKey?: string | null },
+  >(
+    provider: T,
+  ): Promise<
+    Omit<T, 'avatarKey' | 'coverKey'> & {
+      avatarUrl: string | null;
+      coverUrl: string | null;
+    }
+  > {
+    const { avatarKey, coverKey, ...rest } = provider;
+    const sign = async (key: string | null | undefined) =>
+      key ? (await this.uploads.signedUrl(key)).url : null;
+
+    const [avatarUrl, coverUrl] = await Promise.all([
+      sign(avatarKey),
+      sign(coverKey),
+    ]);
+
+    return { ...rest, avatarUrl, coverUrl };
+  }
 
   // -- read ------------------------------------------------------------------
 
@@ -128,6 +189,7 @@ export class ProvidersService {
               orderBy: { price: 'asc' },
               take: 3,
             },
+            ...VERIFICATION_SELECT,
           },
           orderBy,
           skip: dto.skip,
@@ -136,7 +198,21 @@ export class ProvidersService {
         this.prisma.provider.count({ where }),
       ]);
 
-      return paginate(items, total, dto);
+      // Derived per row rather than per request: badges are what a customer
+      // compares on, so they belong on the card and not only on the profile.
+      // One query covers the whole page.
+      const approvals = await readApprovals(
+        this.prisma,
+        items.map((item) => item.id),
+      );
+      const rows = await Promise.all(
+        items.map((item) =>
+          this.withImages(
+            attachVerification(item, approvalsFor(approvals, item.id)),
+          ),
+        ),
+      );
+      return paginate(rows, total, dto);
     });
   }
 
@@ -147,65 +223,94 @@ export class ProvidersService {
    * and falling back, so a miss is a single query.
    */
   async findOne(idOrSlug: string): Promise<unknown> {
-    const byId = UUID_PATTERN.test(idOrSlug);
-    const key = this.cache.detailKey('providers', idOrSlug);
+    /**
+     * A slug is resolved to an id before the cache is consulted, so a provider
+     * has exactly one cache entry.
+     *
+     * Keying the cache on whatever identifier the caller happened to use gave
+     * the same row two entries — one under its id, one under its slug — while
+     * invalidation after a write only ever knew the id. The public profile,
+     * which is linked by slug, then served stale data for the whole five
+     * minute window after every edit.
+     *
+     * The resolution is a single indexed lookup on a unique column; the
+     * expensive part, the profile with its services and areas and hours, is
+     * still cached.
+     */
+    const id = UUID_PATTERN.test(idOrSlug)
+      ? idOrSlug
+      : (
+          await this.prisma.provider.findFirst({
+            where: { slug: idOrSlug, deletedAt: null },
+            select: { id: true },
+          })
+        )?.id;
 
-    const provider = await this.cache.wrap(key, TTL.DETAIL, async () =>
-      this.prisma.provider.findFirst({
-        where: byId
-          ? { id: idOrSlug, deletedAt: null }
-          : { slug: idOrSlug, deletedAt: null },
-        select: {
-          ...PUBLIC_PROVIDER_SELECT,
-          services: {
-            where: { deletedAt: null, status: 'ACTIVE' },
-            select: {
-              id: true,
-              title: true,
-              slug: true,
-              description: true,
-              pricingType: true,
-              price: true,
-              priceUnit: true,
-              minPrice: true,
-              maxPrice: true,
-              durationMinutes: true,
-              category: { select: { id: true, name: true, slug: true } },
-              images: {
-                select: { id: true, position: true },
-                orderBy: { position: 'asc' },
+    if (!id) {
+      throw ApiError.notFound(
+        'PROVIDER_NOT_FOUND',
+        'That provider does not exist.',
+      );
+    }
+
+    const provider = await this.cache.wrap(
+      this.cache.detailKey('providers', id),
+      TTL.DETAIL,
+      async () =>
+        this.prisma.provider.findFirst({
+          where: { id, deletedAt: null },
+          select: {
+            ...PUBLIC_PROVIDER_SELECT,
+            ...VERIFICATION_SELECT,
+            services: {
+              where: { deletedAt: null, status: 'ACTIVE' },
+              select: {
+                id: true,
+                title: true,
+                slug: true,
+                description: true,
+                pricingType: true,
+                price: true,
+                priceUnit: true,
+                minPrice: true,
+                maxPrice: true,
+                durationMinutes: true,
+                category: { select: { id: true, name: true, slug: true } },
+                images: {
+                  select: { id: true, position: true },
+                  orderBy: { position: 'asc' },
+                },
               },
             },
-          },
-          serviceAreas: {
-            select: {
-              id: true,
-              areaType: true,
-              city: true,
-              barangay: true,
-              radiusKm: true,
+            serviceAreas: {
+              select: {
+                id: true,
+                areaType: true,
+                city: true,
+                barangay: true,
+                radiusKm: true,
+              },
+            },
+            availability: {
+              select: {
+                dayOfWeek: true,
+                startTime: true,
+                endTime: true,
+                isClosed: true,
+              },
+            },
+            portfolioItems: {
+              select: {
+                id: true,
+                title: true,
+                description: true,
+                completedAt: true,
+              },
+              orderBy: { position: 'asc' },
+              take: 12,
             },
           },
-          availability: {
-            select: {
-              dayOfWeek: true,
-              startTime: true,
-              endTime: true,
-              isClosed: true,
-            },
-          },
-          portfolioItems: {
-            select: {
-              id: true,
-              title: true,
-              description: true,
-              completedAt: true,
-            },
-            orderBy: { position: 'asc' },
-            take: 12,
-          },
-        },
-      }),
+        }),
     );
 
     if (!provider)
@@ -213,7 +318,16 @@ export class ProvidersService {
         'PROVIDER_NOT_FOUND',
         'That provider does not exist.',
       );
-    return provider;
+    // Read outside the cache, so approving a document shows on the profile
+    // without waiting for the entry to expire.
+    const approvals = await readApprovals(this.prisma, [provider.id]);
+    return this.withImages(
+      attachVerification(
+        // Opening hours as "08:00" rather than a moment in 1970.
+        { ...provider, availability: withTimesOfDay(provider.availability) },
+        approvalsFor(approvals, provider.id),
+      ),
+    );
   }
 
   // -- write -----------------------------------------------------------------
@@ -242,6 +356,7 @@ export class ProvidersService {
       return tx.provider.create({
         data: {
           userId: user.id,
+          providerType: dto.providerType ?? ProviderType.INDIVIDUAL,
           businessName: dto.businessName,
           slug,
           headline: dto.headline ?? null,
@@ -276,6 +391,9 @@ export class ProvidersService {
     const provider = await this.prisma.provider.update({
       where: { id },
       data: {
+        ...(dto.providerType !== undefined
+          ? { providerType: dto.providerType }
+          : {}),
         ...(dto.businessName !== undefined
           ? { businessName: dto.businessName }
           : {}),

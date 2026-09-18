@@ -13,9 +13,18 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
-import { PaymentMethod } from '@prisma/client';
+import { PaymentMethod, ProviderType } from '@prisma/client';
 
 export class CreateProviderDto {
+  /**
+   * Whether they trade as a person or a registered business. Decides which
+   * documents verification asks for, so it is worth getting right up front —
+   * but it can be changed later, and defaults to the commoner case.
+   */
+  @IsOptional()
+  @IsEnum(ProviderType)
+  providerType?: ProviderType;
+
   @IsString()
   @MinLength(2)
   @MaxLength(160)

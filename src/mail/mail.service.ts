@@ -93,6 +93,53 @@ export class MailService implements OnModuleInit {
   }
 
   /** The password reset code email. */
+  /**
+   * The code that proves an address reaches its owner.
+   *
+   * Worded so it cannot be mistaken for a password reset: the two arrive as
+   * six digits from the same sender, and someone who confuses them will type
+   * a reset code into a verification box and wonder why it fails.
+   */
+  async sendEmailVerificationCode(
+    to: string,
+    code: string,
+    minutesValid: number,
+  ): Promise<void> {
+    const spaced = `${code.slice(0, 3)} ${code.slice(3)}`;
+
+    await this.send({
+      to,
+      subject: `${code} is your FixItPH verification code`,
+      text: [
+        'Confirm your email address so providers and customers know it reaches you.',
+        '',
+        `Your code is ${spaced}`,
+        '',
+        `It expires in ${minutesValid} minutes and can be used once.`,
+        '',
+        'This code only confirms your email address. It cannot change your password.',
+        'If you did not ask for it, you can ignore this email.',
+        'Nobody from FixItPH will ever ask you for this code.',
+      ].join('\n'),
+      html: `
+        <div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;max-width:480px;margin:0 auto;padding:32px 24px;color:#101010">
+          <p style="font-size:20px;font-weight:700;margin:0 0 24px">FixItPH</p>
+          <p style="margin:0 0 16px">Confirm your email address so we know it reaches you.</p>
+          <p style="margin:0 0 8px;color:#737373;font-size:14px">Your code</p>
+          <p style="font-size:34px;font-weight:700;letter-spacing:6px;margin:0 0 16px">${spaced}</p>
+          <p style="margin:0 0 24px;color:#737373;font-size:14px">
+            It expires in ${minutesValid} minutes and can be used once.
+          </p>
+          <p style="margin:0;font-size:14px;color:#737373">
+            This code only confirms your email address — it cannot change your
+            password. If you did not ask for it, ignore this email.
+            Nobody from FixItPH will ever ask you for this code.
+          </p>
+        </div>
+      `,
+    });
+  }
+
   async sendPasswordResetCode(
     to: string,
     code: string,
